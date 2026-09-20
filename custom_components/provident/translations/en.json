@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Provident Energy",
+        "description": "Enter your Provident (MeterConnex) account credentials.",
+        "data": {
+          "username": "Username / Account ID",
+          "password": "Password",
+          "base_url": "Portal URL (Optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with Provident Energy",
+        "description": "Please enter your updated password for account {username}.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Provident portal. Please check your network connection.",
+      "invalid_auth": "Invalid username or password. Please verify your credentials.",
+      "rate_limit": "Provident API rate limit reached. Please wait before retrying.",
+      "unknown": "Unexpected error occurred while communicating with Provident."
+    },
+    "abort": {
+      "already_configured": "This Provident Energy account is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Provident Energy Options",
+        "description": "Configure polling settings for your Provident meters.",
+        "data": {
+          "scan_interval": "Data refresh interval (minutes)"
+        }
+      }
+    }
+  }
+}

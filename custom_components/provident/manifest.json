@@ -1,0 +1,12 @@
+{
+  "domain": "provident",
+  "name": "Provident Energy",
+  "codeowners": ["@dangreco", "@ema"],
+  "config_flow": true,
+  "documentation": "https://github.com/dangreco/provident-py",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/dangreco/provident-py/issues",
+  "requirements": ["provident==0.1.4"],
+  "version": "1.0.0"
+}
