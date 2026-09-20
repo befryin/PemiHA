@@ -6,13 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from tests import conftest  # Load mocks
 
-from provident.errors import (
-    ProvidentAuthenticationError,
-    ProvidentConnectionError,
-    ProvidentRateLimitError,
+from custom_components.provident.api import (
+    ProvidentAuthError,
+    ProvidentConnError,
 )
-from provident.models import LoginResult
-
 from custom_components.provident.config_flow import (
     ProvidentConfigFlow,
     validate_credentials,
@@ -23,12 +20,12 @@ from custom_components.provident.const import CONF_BASE_URL, CONF_SCAN_INTERVAL
 class TestProvidentConfigFlow(unittest.IsolatedAsyncioTestCase):
     """Test suite for Provident config flow."""
 
-    @patch("custom_components.provident.config_flow.AsyncProvidentClient")
+    @patch("custom_components.provident.config_flow.ProvidentAPIClient")
     async def test_validate_credentials_success(self, mock_client_cls):
         """Test successful credential validation."""
         mock_client = AsyncMock()
         mock_client_cls.return_value = mock_client
-        mock_client.login.return_value = LoginResult(success=True, msg=None)
+        mock_client.login.return_value = True
 
         errors = await validate_credentials(
             {"username": "user1", "password": "pass", CONF_BASE_URL: "https://provident.meterconnex.com"}
@@ -36,41 +33,29 @@ class TestProvidentConfigFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(errors, {})
         mock_client.close.assert_awaited_once()
 
-    @patch("custom_components.provident.config_flow.AsyncProvidentClient")
+    @patch("custom_components.provident.config_flow.ProvidentAPIClient")
     async def test_validate_credentials_invalid_auth(self, mock_client_cls):
         """Test credential validation with wrong password."""
         mock_client = AsyncMock()
         mock_client_cls.return_value = mock_client
-        mock_client.login.return_value = LoginResult(success=False, msg="Bad credentials")
+        mock_client.login.return_value = False
 
         errors = await validate_credentials(
             {"username": "user1", "password": "wrong_password"}
         )
         self.assertEqual(errors, {"base": "invalid_auth"})
 
-    @patch("custom_components.provident.config_flow.AsyncProvidentClient")
+    @patch("custom_components.provident.config_flow.ProvidentAPIClient")
     async def test_validate_credentials_connection_error(self, mock_client_cls):
         """Test connection failure during credential validation."""
         mock_client = AsyncMock()
         mock_client_cls.return_value = mock_client
-        mock_client.login.side_effect = ProvidentConnectionError("Timeout")
+        mock_client.login.side_effect = ProvidentConnError("Timeout")
 
         errors = await validate_credentials(
             {"username": "user1", "password": "pass"}
         )
         self.assertEqual(errors, {"base": "cannot_connect"})
-
-    @patch("custom_components.provident.config_flow.AsyncProvidentClient")
-    async def test_validate_credentials_rate_limit(self, mock_client_cls):
-        """Test rate limit during credential validation."""
-        mock_client = AsyncMock()
-        mock_client_cls.return_value = mock_client
-        mock_client.login.side_effect = ProvidentRateLimitError(429, "Rate limited")
-
-        errors = await validate_credentials(
-            {"username": "user1", "password": "pass"}
-        )
-        self.assertEqual(errors, {"base": "rate_limit"})
 
     @patch("custom_components.provident.config_flow.validate_credentials")
     async def test_flow_user_step_success(self, mock_validate):

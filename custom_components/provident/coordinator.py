@@ -13,15 +13,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
 
-from provident import AsyncProvidentClient, Period, ProvidentConfig
-from provident.errors import (
-    ProvidentAuthenticationError,
-    ProvidentConnectionError,
-    ProvidentError,
-    ProvidentRateLimitError,
-    ProvidentServerError,
-)
-
+from .api import ProvidentAPIClient, ProvidentAuthError, ProvidentConnError, ProvidentAPIError
 from .const import (
     CONF_BASE_URL,
     CONF_SCAN_INTERVAL,
@@ -57,9 +49,8 @@ class ProvidentUtilityData:
 def normalize_unit(unit_str: str | None, utility_name: str) -> str:
     """Normalize reported unit string into standard Home Assistant units."""
     if not unit_str:
-        # Infer standard default based on utility name
-        name_lower = utility_name.lower()
-        if "electr" in name_lower or "ev" in name_lower:
+        name_lower = utility_name.lower().strip()
+        if "electr" in name_lower or name_lower == "ev" or "ev " in name_lower:
             return "kWh"
         if "water" in name_lower:
             return "m³"
@@ -118,8 +109,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
             update_interval=update_interval,
         )
 
-        provident_config = ProvidentConfig(base_url=self.base_url)
-        self.client = AsyncProvidentClient(provident_config)
+        self.client = ProvidentAPIClient(base_url=self.base_url)
 
     async def async_close(self) -> None:
         """Close the underlying HTTP client session."""
@@ -133,13 +123,12 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
         try:
             if not self.client.is_authenticated or not await self.client.check_login():
                 _LOGGER.debug("Authenticating with Provident API for user %s", self.username)
-                result = await self.client.login(self.username, self.password)
-                if not result.success:
-                    msg = result.msg or "Invalid username or password"
-                    raise ConfigEntryAuthFailed(msg)
-        except ProvidentAuthenticationError as err:
+                success = await self.client.login(self.username, self.password)
+                if not success:
+                    raise ConfigEntryAuthFailed("Invalid username or password")
+        except ProvidentAuthError as err:
             raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
-        except (ProvidentConnectionError, ProvidentServerError, ProvidentRateLimitError) as err:
+        except ProvidentConnError as err:
             raise UpdateFailed(f"Communication error during login: {err}") from err
         except ConfigEntryAuthFailed:
             raise
@@ -152,9 +141,9 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
 
         try:
             utilities = await self.client.get_utilities()
-        except ProvidentAuthenticationError as err:
+        except ProvidentAuthError as err:
             raise ConfigEntryAuthFailed(f"Authentication failed fetching utilities: {err}") from err
-        except ProvidentError as err:
+        except ProvidentAPIError as err:
             raise UpdateFailed(f"Error fetching utility list: {err}") from err
         except Exception as err:
             raise UpdateFailed(f"Unexpected error fetching utility list: {err}") from err
@@ -166,7 +155,6 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
         now = dt_util.now()
         today = now.date()
         yesterday = today - timedelta(days=1)
-        thirty_days_ago = today - timedelta(days=30)
         first_of_month = date(today.year, today.month, 1)
         first_of_year = date(today.year, 1, 1)
 
@@ -174,40 +162,32 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
 
         for utility in utilities:
             try:
-                # 1. Fetch Yesterday (Previous Day - primary due to 1-day reporting delay)
-                yesterday_res = await self.client.get_chart_data(
-                    utility, Period.DAY, yesterday
-                )
-                yesterday_hourly = [float(v) for v in (yesterday_res.data or [])]
+                # 1. Fetch Summary Card Data (Matches 30-day card on Provident dashboard)
+                card_data = await self.client.get_card_data(utility, period=30)
+                last_30_days_daily = card_data["data"]
+                last_30_days_total = card_data["total"]
+
+                # 2. Fetch Yesterday (Previous Day - primary due to 1-day reporting delay)
+                yesterday_res = await self.client.get_chart_data(utility, "day", yesterday)
+                yesterday_hourly = yesterday_res["data"]
                 yesterday_total = round(sum(yesterday_hourly), 4)
 
-                # 2. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
-                day_res = await self.client.get_chart_data(utility, Period.DAY, today)
-                today_hourly = [float(v) for v in (day_res.data or [])]
+                # 3. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
+                today_res = await self.client.get_chart_data(utility, "day", today)
+                today_hourly = today_res["data"]
                 today_total = round(sum(today_hourly), 4)
 
-                # 3. Fetch Last 30 Days (Breakdown matching Provident homepage cards)
-                last_30_res = await self.client.get_chart_data(
-                    utility, Period.MONTH, thirty_days_ago
-                )
-                last_30_daily = [float(v) for v in (last_30_res.data or [])]
-                last_30_total = round(sum(last_30_daily), 4)
-
                 # 4. Fetch Month-to-Date (Daily breakdown)
-                month_res = await self.client.get_chart_data(
-                    utility, Period.MONTH, first_of_month
-                )
-                daily_data = [float(v) for v in (month_res.data or [])]
+                month_res = await self.client.get_chart_data(utility, "month", first_of_month)
+                daily_data = month_res["data"]
                 month_total = round(sum(daily_data), 4)
 
                 # 5. Fetch Year (Monthly breakdown)
-                year_res = await self.client.get_chart_data(
-                    utility, Period.YEAR, first_of_year
-                )
-                monthly_data = [float(v) for v in (year_res.data or [])]
+                year_res = await self.client.get_chart_data(utility, "year", first_of_year)
+                monthly_data = year_res["data"]
                 year_total = round(sum(monthly_data), 4)
 
-                # Determine latest reading (from today if available, otherwise yesterday)
+                # Determine latest reading
                 latest_reading = 0.0
                 reading_source = [v for v in today_hourly if v > 0]
                 if reading_source:
@@ -218,14 +198,16 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                         latest_reading = round(yesterday_non_zero[-1], 4)
                     elif yesterday_hourly:
                         latest_reading = round(yesterday_hourly[-1], 4)
+                    elif last_30_days_daily:
+                        latest_reading = round(last_30_days_daily[-1], 4)
 
                 # Normalize units from any available response
                 raw_units = (
-                    yesterday_res.units
-                    or day_res.units
-                    or last_30_res.units
-                    or month_res.units
-                    or year_res.units
+                    card_data["units"]
+                    or yesterday_res["units"]
+                    or month_res["units"]
+                    or year_res["units"]
+                    or today_res["units"]
                 )
                 units = normalize_unit(raw_units, utility)
 
@@ -237,8 +219,8 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     yesterday_date=yesterday.isoformat(),
                     today_total=today_total,
                     today_hourly=today_hourly,
-                    last_30_days_total=last_30_total,
-                    last_30_days_daily=last_30_daily,
+                    last_30_days_total=last_30_days_total,
+                    last_30_days_daily=last_30_days_daily,
                     month_total=month_total,
                     month_daily=daily_data,
                     year_total=year_total,
@@ -248,23 +230,21 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
 
                 _LOGGER.debug(
-                    "Fetched %s: Yesterday=%.3f %s, Last30Days=%.3f %s, Month=%.3f %s, Year=%.3f %s, Today=%.3f %s",
+                    "Fetched %s: Yesterday=%.3f %s, Last30Days=%.3f %s, Month=%.3f %s, Year=%.3f %s",
                     utility,
                     yesterday_total,
                     units,
-                    last_30_total,
+                    last_30_days_total,
                     units,
                     month_total,
                     units,
                     year_total,
                     units,
-                    today_total,
-                    units,
                 )
 
-            except ProvidentAuthenticationError as err:
+            except ProvidentAuthError as err:
                 raise ConfigEntryAuthFailed(f"Authentication expired fetching {utility}: {err}") from err
-            except (ProvidentConnectionError, ProvidentRateLimitError, ProvidentServerError) as err:
+            except (ProvidentConnError, ProvidentAPIError) as err:
                 _LOGGER.warning("Transient error fetching meter data for %s: %s", utility, err)
                 if self.data and utility in self.data:
                     data_by_utility[utility] = self.data[utility]

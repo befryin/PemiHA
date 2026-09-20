@@ -11,13 +11,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
-from provident import AsyncProvidentClient, ProvidentConfig
-from provident.errors import (
-    ProvidentAuthenticationError,
-    ProvidentConnectionError,
-    ProvidentRateLimitError,
-)
-
+from .api import ProvidentAPIClient, ProvidentAuthError, ProvidentConnError
 from .const import (
     CONF_BASE_URL,
     CONF_SCAN_INTERVAL,
@@ -45,20 +39,16 @@ async def validate_credentials(data: dict[str, Any]) -> dict[str, str]:
     """
     errors: dict[str, str] = {}
     base_url = data.get(CONF_BASE_URL, DEFAULT_BASE_URL)
-    provident_config = ProvidentConfig(base_url=base_url)
-    client = AsyncProvidentClient(provident_config)
+    client = ProvidentAPIClient(base_url=base_url)
 
     try:
-        result = await client.login(data[CONF_USERNAME], data[CONF_PASSWORD])
-        if not result.success:
-            _LOGGER.warning("Provident login failed: %s", result.msg)
+        success = await client.login(data[CONF_USERNAME], data[CONF_PASSWORD])
+        if not success:
             errors["base"] = "invalid_auth"
-    except ProvidentAuthenticationError:
+    except ProvidentAuthError:
         errors["base"] = "invalid_auth"
-    except ProvidentConnectionError:
+    except ProvidentConnError:
         errors["base"] = "cannot_connect"
-    except ProvidentRateLimitError:
-        errors["base"] = "rate_limit"
     except Exception as err:  # pylint: disable=broad-except
         _LOGGER.exception("Unexpected error during Provident authentication: %s", err)
         errors["base"] = "unknown"
@@ -85,7 +75,6 @@ class ProvidentConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             username = user_input[CONF_USERNAME].strip()
-            # Clean username in data dict
             user_input[CONF_USERNAME] = username
 
             await self.async_set_unique_id(username.lower())

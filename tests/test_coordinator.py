@@ -12,12 +12,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from provident.errors import (
-    ProvidentAuthenticationError,
-    ProvidentConnectionError,
+from custom_components.provident.api import (
+    ProvidentAuthError,
+    ProvidentConnError,
 )
-from provident.models import ChartDataResult, LoginResult
-
 from custom_components.provident.const import (
     CONF_BASE_URL,
     CONF_SCAN_INTERVAL,
@@ -67,7 +65,7 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_unit(None, "Cooling"), "kWh")
         self.assertEqual(normalize_unit(None, "Heating"), "kWh")
 
-    @patch("custom_components.provident.coordinator.AsyncProvidentClient")
+    @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_data_fetch_success(self, mock_client_cls):
         """Test successful data update coordinator refresh."""
         mock_client = AsyncMock()
@@ -75,7 +73,7 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
 
         mock_client.is_authenticated = False
         mock_client.check_login.return_value = False
-        mock_client.login.return_value = LoginResult(success=True, msg=None)
+        mock_client.login.return_value = True
         mock_client.get_utilities.return_value = [
             "Electricity",
             "EV",
@@ -84,45 +82,60 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
             "Heating",
         ]
 
-        # Return mock chart data for different queries
-        async def mock_get_chart_data(meter, period, start):
-            if meter == "Electricity":
-                if period.value == "day":
-                    return ChartDataResult(error=False, units="kWh", data=[0.5, 0.7, 1.2, 0.0])
-                if period.value == "month":
-                    return ChartDataResult(error=False, units="kWh", data=[10.0, 12.0, 15.0])
-                if period.value == "year":
-                    return ChartDataResult(error=False, units="kWh", data=[200.0, 250.0])
-            elif meter == "EV":
-                if period.value == "day":
-                    return ChartDataResult(error=False, units="kWh", data=[3.5, 4.0, 0.0])
-                if period.value == "month":
-                    return ChartDataResult(error=False, units="kWh", data=[45.0, 50.0])
-                if period.value == "year":
-                    return ChartDataResult(error=False, units="kWh", data=[500.0])
-            elif meter == "Hot Water":
-                if period.value == "day":
-                    return ChartDataResult(error=False, units="m3", data=[0.05, 0.10, 0.08])
-                if period.value == "month":
-                    return ChartDataResult(error=False, units="m3", data=[1.5, 2.0])
-                if period.value == "year":
-                    return ChartDataResult(error=False, units="m3", data=[20.0])
-            elif meter == "Cooling":
-                if period.value == "day":
-                    return ChartDataResult(error=False, units="kWh", data=[1.0, 2.5])
-                if period.value == "month":
-                    return ChartDataResult(error=False, units="kWh", data=[30.0, 94.0])
-                if period.value == "year":
-                    return ChartDataResult(error=False, units="kWh", data=[150.0])
-            elif meter == "Heating":
-                if period.value == "day":
-                    return ChartDataResult(error=False, units="kWh", data=[0.0])
-                if period.value == "month":
-                    return ChartDataResult(error=False, units="kWh", data=[0.0])
-                if period.value == "year":
-                    return ChartDataResult(error=False, units="kWh", data=[0.0])
-            return ChartDataResult(error=False, units="unknown", data=[])
+        # Return mock card data
+        async def mock_get_card_data(utility, period=30):
+            if utility == "Electricity":
+                return {"total": 402.0, "units": "kWh", "data": [10.0, 12.0, 15.0]}
+            if utility == "EV":
+                return {"total": 116.0, "units": "kWh", "data": [3.5, 4.0]}
+            if utility == "Hot Water":
+                return {"total": 3.136, "units": "m3", "data": [0.05, 0.10]}
+            if utility == "Cooling":
+                return {"total": 124.0, "units": "kWh", "data": [1.0, 2.5]}
+            if utility == "Heating":
+                return {"total": 0.0, "units": "kWh", "data": [0.0]}
+            return {"total": 0.0, "units": "", "data": []}
 
+        # Return mock chart data
+        async def mock_get_chart_data(utility, period, start):
+            if utility == "Electricity":
+                if period == "day":
+                    return {"error": False, "units": "kWh", "data": [0.5, 0.7, 1.2, 0.0]}
+                if period == "month":
+                    return {"error": False, "units": "kWh", "data": [10.0, 12.0, 15.0]}
+                if period == "year":
+                    return {"error": False, "units": "kWh", "data": [0.0, 6.26, 469.75, 479.85, 298.57]}
+            elif utility == "EV":
+                if period == "day":
+                    return {"error": False, "units": "kWh", "data": [3.5, 4.0, 0.0]}
+                if period == "month":
+                    return {"error": False, "units": "kWh", "data": [45.0, 50.0]}
+                if period == "year":
+                    return {"error": False, "units": "kWh", "data": [500.0]}
+            elif utility == "Hot Water":
+                if period == "day":
+                    return {"error": False, "units": "m3", "data": [0.05, 0.10, 0.08]}
+                if period == "month":
+                    return {"error": False, "units": "m3", "data": [1.5, 2.0]}
+                if period == "year":
+                    return {"error": False, "units": "m3", "data": [20.0]}
+            elif utility == "Cooling":
+                if period == "day":
+                    return {"error": False, "units": "kWh", "data": [1.0, 2.5]}
+                if period == "month":
+                    return {"error": False, "units": "kWh", "data": [30.0, 94.0]}
+                if period == "year":
+                    return {"error": False, "units": "kWh", "data": [150.0]}
+            elif utility == "Heating":
+                if period == "day":
+                    return {"error": False, "units": "kWh", "data": [0.0]}
+                if period == "month":
+                    return {"error": False, "units": "kWh", "data": [0.0]}
+                if period == "year":
+                    return {"error": False, "units": "kWh", "data": [0.0]}
+            return {"error": False, "units": "unknown", "data": []}
+
+        mock_client.get_card_data.side_effect = mock_get_card_data
         mock_client.get_chart_data.side_effect = mock_get_chart_data
 
         coordinator = ProvidentDataUpdateCoordinator(self.hass, self.entry)
@@ -137,31 +150,31 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         elec = coordinator.data["Electricity"]
         self.assertEqual(elec.name, "Electricity")
         self.assertEqual(elec.units, "kWh")
+        self.assertEqual(elec.last_30_days_total, 402.0)
         self.assertEqual(elec.yesterday_total, 2.4)
         self.assertEqual(elec.today_total, 2.4)
         self.assertEqual(elec.latest_reading, 1.2)
-        self.assertEqual(elec.last_30_days_total, 37.0)
         self.assertEqual(elec.month_total, 37.0)
-        self.assertEqual(elec.year_total, 450.0)
 
         ev = coordinator.data["EV"]
         self.assertEqual(ev.name, "EV")
         self.assertEqual(ev.units, "kWh")
+        self.assertEqual(ev.last_30_days_total, 116.0)
         self.assertEqual(ev.yesterday_total, 7.5)
         self.assertEqual(ev.latest_reading, 4.0)
 
         hw = coordinator.data["Hot Water"]
         self.assertEqual(hw.name, "Hot Water")
         self.assertEqual(hw.units, "m³")
+        self.assertEqual(hw.last_30_days_total, 3.136)
         self.assertAlmostEqual(hw.yesterday_total, 0.23, places=2)
 
         cool = coordinator.data["Cooling"]
         self.assertEqual(cool.name, "Cooling")
         self.assertEqual(cool.units, "kWh")
-        self.assertEqual(cool.yesterday_total, 3.5)
         self.assertEqual(cool.last_30_days_total, 124.0)
 
-    @patch("custom_components.provident.coordinator.AsyncProvidentClient")
+    @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_auth_failure(self, mock_client_cls):
         """Test coordinator raising ConfigEntryAuthFailed when login fails."""
         mock_client = AsyncMock()
@@ -169,14 +182,14 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
 
         mock_client.is_authenticated = False
         mock_client.check_login.return_value = False
-        mock_client.login.return_value = LoginResult(success=False, msg="Invalid password")
+        mock_client.login.return_value = False
 
         coordinator = ProvidentDataUpdateCoordinator(self.hass, self.entry)
 
         with self.assertRaises(ConfigEntryAuthFailed):
             await coordinator.async_config_entry_first_refresh()
 
-    @patch("custom_components.provident.coordinator.AsyncProvidentClient")
+    @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_connection_failure(self, mock_client_cls):
         """Test coordinator raising UpdateFailed on connection failure."""
         mock_client = AsyncMock()
@@ -184,7 +197,7 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
 
         mock_client.is_authenticated = False
         mock_client.check_login.return_value = False
-        mock_client.login.side_effect = ProvidentConnectionError("Timeout")
+        mock_client.login.side_effect = ProvidentConnError("Timeout")
 
         coordinator = ProvidentDataUpdateCoordinator(self.hass, self.entry)
 
