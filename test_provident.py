@@ -2,10 +2,6 @@
 
 Run this script to test authentication and inspect the raw API responses:
     python3 test_provident.py
-(It will prompt securely for your username and password)
-
-Or pass arguments with quotes:
-    python3 test_provident.py "your_username" "your_password"
 """
 from __future__ import annotations
 
@@ -22,6 +18,8 @@ DEFAULT_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Content-Type": "application/json",
     "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://provident.meterconnex.com",
+    "Referer": "https://provident.meterconnex.com/secure/Dashboard/",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
 }
 
@@ -37,15 +35,23 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
             json={"username": username, "password": password, "rememberMe": False},
         )
         print(f"Status: {login_resp.status_code}")
-        print(f"Cookies: {dict(client.cookies)}")
+        print(f"Cookies after login: {dict(client.cookies)}")
         print(f"Raw Response: {login_resp.text}\n")
 
         if ".ASPXAUTH" not in client.cookies:
             print("[!] ERROR: .ASPXAUTH cookie not received. Login failed.")
             return
 
-        # 2. Get Utilities
-        print("--- 2. Testing GetUtilities ---")
+        # 2. Crucial Step: GET /secure/Dashboard/ to initialize ASP.NET Session state & meter registry
+        print("--- 2. Initializing ASP.NET Session State via GET /secure/Dashboard/ ---")
+        dash_resp = await client.get("/secure/Dashboard/")
+        print(f"Dashboard Page GET Status: {dash_resp.status_code}")
+        print(f"Cookies after Dashboard GET: {dict(client.cookies)}")
+        print(f"Dashboard Page URL: {dash_resp.url}")
+        print(f"Dashboard HTML size: {len(dash_resp.text)} bytes\n")
+
+        # 3. Get Utilities
+        print("--- 3. Testing GetUtilities ---")
         util_resp = await client.post("/secure/Dashboard/Default.aspx/GetUtilities", json={})
         print(f"Status: {util_resp.status_code}")
         print(f"Raw Response: {util_resp.text}\n")
@@ -57,7 +63,7 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
                 utilities = json.loads(utilities)
         except Exception as err:
             print(f"[!] Failed to parse utilities: {err}")
-            utilities = ["Electricity", "EV", "Hot Water", "Cooling", "Heating"]
+            utilities = ["Cooling", "Electricity", "EV", "Heating", "Hot Water"]
 
         print(f"Discovered Utilities: {utilities}\n")
 
@@ -66,7 +72,7 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
         first_of_month = date(today.year, today.month, 1)
         first_of_year = date(today.year, 1, 1)
 
-        # 3. Test Each Utility
+        # 4. Test Each Utility
         for u in utilities:
             print(f"==================================================")
             print(f" TESTING UTILITY: {u}")

@@ -15,6 +15,8 @@ DEFAULT_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Content-Type": "application/json",
     "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://provident.meterconnex.com",
+    "Referer": "https://provident.meterconnex.com/secure/Dashboard/",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
 }
 
@@ -141,9 +143,12 @@ class ProvidentAPIClient:
     def __init__(self, base_url: str = "https://provident.meterconnex.com") -> None:
         """Initialize API client."""
         self.base_url = base_url.rstrip("/")
+        headers = dict(DEFAULT_HEADERS)
+        headers["Origin"] = self.base_url
+        headers["Referer"] = f"{self.base_url}/secure/Dashboard/"
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
-            headers=DEFAULT_HEADERS,
+            headers=headers,
             timeout=30.0,
             follow_redirects=True,
         )
@@ -172,13 +177,21 @@ class ProvidentAPIClient:
         return _unwrap_response(resp)
 
     async def login(self, username: str, password: str, remember_me: bool = False) -> bool:
-        """Authenticate with Provident portal."""
+        """Authenticate with Provident portal and initialize ASP.NET Session state."""
         data = await self._post(
             "/login/LoginService.aspx/ProcessLogin",
             {"username": username, "password": password, "rememberMe": remember_me},
         )
         if isinstance(data, dict) and data.get("success"):
+            # CRUCIAL: Must visit /secure/Dashboard/ so ASP.NET executes Page_Load
+            # and populates Session["CurrentAccount"], Session["MeterList"], etc.
+            try:
+                resp = await self._client.get("/secure/Dashboard/")
+                _LOGGER.debug("Initialized dashboard session state, status: %s", resp.status_code)
+            except Exception as err:
+                _LOGGER.warning("Failed to initialize dashboard session: %s", err)
             return True
+
         msg = data.get("msg") if isinstance(data, dict) else "Invalid credentials"
         _LOGGER.warning("Provident login failed for %s: %s", username, msg)
         return False
@@ -210,7 +223,12 @@ class ProvidentAPIClient:
 
         last_updated = None
         if isinstance(data, dict):
-            last_updated = data.get("lastUpdated") or data.get("LastUpdated") or data.get("date")
+            last_updated = (
+                data.get("lastUpdated")
+                or data.get("LastUpdated")
+                or data.get("lastUpdate")
+                or data.get("date")
+            )
 
         return {
             "total": total,
