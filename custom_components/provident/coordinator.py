@@ -183,30 +183,17 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     if non_zero_days:
                         yesterday_total = round(non_zero_days[-1], 4)
 
-                # 3. Fetch Historical Hourly Breakdown for prior days (past 7 days prior to today)
-                past_dates = [today - timedelta(days=i) for i in range(2, 8)]
-                past_results = await asyncio.gather(
-                    *(self.client.get_chart_data(utility, "day", pd) for pd in past_dates),
-                    return_exceptions=True,
-                )
-
+                # Preserve any previously fetched on-demand history for this utility
                 daily_hourly_history: dict[str, list[float]] = {}
                 daily_totals_history: dict[str, float] = {}
+                if self.data and utility in self.data:
+                    daily_hourly_history = dict(self.data[utility].daily_hourly_history)
+                    daily_totals_history = dict(self.data[utility].daily_totals_history)
 
-                # Include yesterday
+                # Always maintain yesterday in historical breakdown
                 yesterday_date_str = yesterday.isoformat()
                 daily_hourly_history[yesterday_date_str] = yesterday_hourly
                 daily_totals_history[yesterday_date_str] = yesterday_total
-
-                for pd, res in zip(past_dates, past_results):
-                    pd_str = pd.isoformat()
-                    if isinstance(res, dict) and "data" in res:
-                        h_data = res["data"]
-                        daily_hourly_history[pd_str] = h_data
-                        daily_totals_history[pd_str] = round(sum(h_data), 4)
-                    else:
-                        daily_hourly_history[pd_str] = []
-                        daily_totals_history[pd_str] = 0.0
 
                 hourly_breakdown_past_days = [
                     {
@@ -217,19 +204,19 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     for d_str in sorted(daily_hourly_history.keys(), reverse=True)
                 ]
 
-                # 4. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
+                # 3. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
                 today_res = await self.client.get_chart_data(utility, "day", today)
                 today_hourly = today_res["data"]
                 today_total = round(sum(today_hourly), 4)
 
-                # 5. Fetch Year-to-Date (12 monthly numbers)
+                # 4. Fetch Year-to-Date (12 monthly numbers)
                 year_res = await self.client.get_chart_data(utility, "year", first_of_year)
                 year_monthly = year_res["data"]
                 year_total = round(sum(year_monthly), 4)
                 if year_total == 0.0 and last_30_days_total > 0:
                     year_total = last_30_days_total
 
-                # 6. Fetch Month-to-Date (Daily breakdown)
+                # 5. Fetch Month-to-Date (Daily breakdown)
                 month_res = await self.client.get_chart_data(utility, "month", first_of_month)
                 month_daily = month_res["data"]
                 month_total = round(sum(month_daily), 4)
@@ -297,7 +284,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
 
                 _LOGGER.debug(
-                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s (History: %d days)",
+                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s",
                     utility,
                     portal_total,
                     units,
@@ -307,7 +294,6 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     units,
                     year_total,
                     units,
-                    len(daily_hourly_history),
                 )
 
             except ProvidentAuthError as err:
@@ -326,3 +312,88 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     raise UpdateFailed(f"Unexpected error for {utility}: {err}") from err
 
         return data_by_utility
+
+    async def async_fetch_historical_hourly(
+        self,
+        utility_name: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        days: int = 7,
+        update_entities: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch historical hourly breakdown on demand for specific date range or past N days."""
+        await self._async_ensure_login()
+        now = dt_util.now()
+        today = now.date()
+
+        # Determine utilities to query
+        if utility_name and utility_name.strip().lower() not in ("all", "*", ""):
+            u_clean = utility_name.strip()
+            target_utilities = [u for u in self.data.keys() if u.lower() == u_clean.lower()]
+            if not target_utilities:
+                target_utilities = [u_clean]
+        else:
+            target_utilities = list(self.data.keys()) or await self.client.get_utilities()
+
+        # Determine dates to query
+        if start_date and end_date:
+            dates = []
+            curr = start_date
+            while curr <= end_date:
+                dates.append(curr)
+                curr += timedelta(days=1)
+        else:
+            if not end_date:
+                end_date = today - timedelta(days=1)
+            num_days = max(1, min(int(days), 90))
+            dates = [end_date - timedelta(days=i) for i in range(num_days)]
+
+        results_by_utility: dict[str, Any] = {}
+
+        for utility in target_utilities:
+            day_results = await asyncio.gather(
+                *(self.client.get_chart_data(utility, "day", d) for d in dates),
+                return_exceptions=True,
+            )
+
+            hourly_map: dict[str, list[float]] = {}
+            totals_map: dict[str, float] = {}
+
+            for d, res in zip(dates, day_results):
+                d_str = d.isoformat()
+                if isinstance(res, dict) and "data" in res:
+                    h_data = res["data"]
+                    hourly_map[d_str] = h_data
+                    totals_map[d_str] = round(sum(h_data), 4)
+                else:
+                    hourly_map[d_str] = []
+                    totals_map[d_str] = 0.0
+
+            results_by_utility[utility] = {
+                "utility": utility,
+                "readings": hourly_map,
+                "totals": totals_map,
+                "breakdown": [
+                    {"date": d_str, "total": totals_map[d_str], "hourly": hourly_map[d_str]}
+                    for d_str in sorted(hourly_map.keys(), reverse=True)
+                ],
+            }
+
+            # Update coordinator cache & entities if requested
+            if update_entities and self.data and utility in self.data:
+                util_data = self.data[utility]
+                util_data.daily_hourly_history.update(hourly_map)
+                util_data.daily_totals_history.update(totals_map)
+                util_data.hourly_breakdown_past_days = [
+                    {
+                        "date": d_str,
+                        "total": util_data.daily_totals_history[d_str],
+                        "hourly": util_data.daily_hourly_history[d_str],
+                    }
+                    for d_str in sorted(util_data.daily_hourly_history.keys(), reverse=True)
+                ]
+
+        if update_entities and self.data:
+            self.async_set_updated_data(self.data)
+
+        return results_by_utility

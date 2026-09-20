@@ -1,0 +1,43 @@
+get_hourly_breakdown:
+  name: Get Hourly Breakdown
+  description: On-demand retrieval of historical 24-hour interval usage breakdown for past days.
+  fields:
+    utility:
+      name: Utility Name
+      description: Specific utility to fetch (e.g. Electricity, EV, Hot Water, Cooling) or leave empty for all discovered utilities.
+      required: false
+      example: "Electricity"
+      selector:
+        text:
+    days:
+      name: Number of Past Days
+      description: Number of past days prior to today to retrieve (e.g. 7, 14, 30).
+      required: false
+      default: 7
+      example: 7
+      selector:
+        number:
+          min: 1
+          max: 90
+          mode: box
+    start_date:
+      name: Start Date
+      description: Optional start date (YYYY-MM-DD). If provided along with end_date, overrides the days parameter.
+      required: false
+      example: "2026-09-01"
+      selector:
+        date:
+    end_date:
+      name: End Date
+      description: Optional end date (YYYY-MM-DD).
+      required: false
+      example: "2026-09-19"
+      selector:
+        date:
+    update_entities:
+      name: Update Sensor Attributes
+      description: Whether to update Home Assistant sensor entity attributes with the fetched historical breakdown.
+      required: false
+      default: true
+      selector:
+        boolean:

@@ -155,9 +155,7 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elec.today_total, 2.4)
         self.assertEqual(elec.latest_reading, 1.2)
         self.assertEqual(elec.month_total, 37.0)
-        self.assertTrue(len(elec.daily_hourly_history) >= 7)
-        self.assertTrue(len(elec.daily_totals_history) >= 7)
-        self.assertTrue(len(elec.hourly_breakdown_past_days) >= 7)
+        self.assertEqual(len(elec.yesterday_hourly), 4)
 
         ev = coordinator.data["EV"]
         self.assertEqual(ev.name, "EV")
@@ -176,6 +174,16 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cool.name, "Cooling")
         self.assertEqual(cool.units, "kWh")
         self.assertEqual(cool.last_30_days_total, 124.0)
+
+        # Test on-demand historical hourly retrieval
+        hist_res = await coordinator.async_fetch_historical_hourly(
+            utility_name="Electricity",
+            days=5,
+            update_entities=True,
+        )
+        self.assertIn("Electricity", hist_res)
+        self.assertEqual(len(hist_res["Electricity"]["readings"]), 5)
+        self.assertTrue(len(coordinator.data["Electricity"].daily_hourly_history) >= 5)
 
     @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_auth_failure(self, mock_client_cls):

@@ -177,6 +177,31 @@ series:
 
 ---
 
+## ⚡ On-Demand Hourly Breakdown Service
+
+To avoid excessive polling while still providing complete historical access, hourly breakdowns for any historical days can be retrieved **on demand** using the `provident.get_hourly_breakdown` service action.
+
+### Service Action: `provident.get_hourly_breakdown`
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `utility` | string | `""` (all) | Specific utility (e.g. `Electricity`, `EV`, `Hot Water`) or leave empty for all meters. |
+| `days` | integer | `7` | Number of past days prior to today to retrieve (1 to 90 days). |
+| `start_date` | string (date) | *optional* | Custom start date (`YYYY-MM-DD`). |
+| `end_date` | string (date) | *optional* | Custom end date (`YYYY-MM-DD`). |
+| `update_entities` | boolean | `true` | When `true`, updates sensor entity attributes with the fetched historical series. |
+
+#### Example Automation / Script:
+```yaml
+action: provident.get_hourly_breakdown
+data:
+  utility: "Electricity"
+  days: 14
+  update_entities: true
+```
+
+---
+
 ## Troubleshooting & Debug Logging
 
 To enable verbose debug logs for the integration, add the following to your `configuration.yaml`:

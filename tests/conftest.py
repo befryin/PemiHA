@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 # If homeassistant is not in sys.modules, create lightweight mocks for testing
@@ -50,11 +50,54 @@ if "homeassistant" not in sys.modules:
 
     # 3. core module
     ha_core = types.ModuleType("homeassistant.core")
+    class SupportsResponse(StrEnum):
+        NONE = "none"
+        OPTIONAL = "optional"
+        ONLY = "only"
+
+    class ServiceCall:
+        def __init__(self, domain: str, service: str, data: dict | None = None, return_response: bool = False):
+            self.domain = domain
+            self.service = service
+            self.data = data or {}
+            self.return_response = return_response
+
+    class ServiceRegistry:
+        def __init__(self):
+            self._services = {}
+
+        def async_register(self, domain, service, service_func, schema=None, supports_response=None):
+            self._services[(domain, service)] = {
+                "func": service_func,
+                "schema": schema,
+                "supports_response": supports_response,
+            }
+
+        def async_remove(self, domain, service):
+            self._services.pop((domain, service), None)
+
+        def has_service(self, domain, service):
+            return (domain, service) in self._services
+
+        async def async_call(self, domain, service, service_data=None, blocking=False, return_response=False):
+            key = (domain, service)
+            if key in self._services:
+                call = ServiceCall(domain, service, service_data, return_response=return_response)
+                return await self._services[key]["func"](call)
+            return None
+
     class HomeAssistant:
         def __init__(self):
             self.data = {}
             self.config_entries = MagicMock()
+            self.config_entries.async_forward_entry_setups = AsyncMock()
+            self.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+            self.services = ServiceRegistry()
+
     ha_core.HomeAssistant = HomeAssistant
+    ha_core.ServiceCall = ServiceCall
+    ha_core.ServiceResponse = dict | None
+    ha_core.SupportsResponse = SupportsResponse
     ha_core.callback = lambda fn: fn
     sys.modules["homeassistant.core"] = ha_core
 
@@ -145,6 +188,13 @@ if "homeassistant" not in sys.modules:
         async def _async_update_data(self):
             raise NotImplementedError
 
+        def async_set_updated_data(self, data):
+            self.data = data
+            self.async_update_listeners()
+
+        def async_update_listeners(self):
+            pass
+
     class CoordinatorEntity:
         __class_getitem__ = classmethod(lambda cls, item: cls)
 
@@ -158,6 +208,14 @@ if "homeassistant" not in sys.modules:
     ha_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
     ha_coordinator.CoordinatorEntity = CoordinatorEntity
     sys.modules["homeassistant.helpers.update_coordinator"] = ha_coordinator
+
+    # config_validation module
+    ha_cv = types.ModuleType("homeassistant.helpers.config_validation")
+    ha_cv.string = str
+    ha_cv.boolean = bool
+    ha_cv.positive_int = int
+    ha_cv.date = str
+    sys.modules["homeassistant.helpers.config_validation"] = ha_cv
 
     # 8. helpers.device_registry module
     ha_dev_reg = types.ModuleType("homeassistant.helpers.device_registry")
