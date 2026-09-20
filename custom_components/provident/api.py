@@ -176,6 +176,20 @@ class ProvidentAPIClient:
 
         return _unwrap_response(resp)
 
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """Perform GET request and unwrap response."""
+        try:
+            resp = await self._client.get(path, params=params)
+        except httpx.HTTPError as exc:
+            raise ProvidentConnError(f"HTTP connection error: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise ProvidentAuthError("Authentication expired or invalid.")
+        if resp.status_code >= 400:
+            raise ProvidentAPIError(f"HTTP {resp.status_code}: {resp.text}")
+
+        return _unwrap_response(resp)
+
     async def login(self, username: str, password: str, remember_me: bool = False) -> bool:
         """Authenticate with Provident portal and initialize ASP.NET Session state."""
         data = await self._post(
@@ -257,3 +271,40 @@ class ProvidentAPIClient:
             "units": units,
             "data": data_list,
         }
+
+    async def get_meter_tree(self, depth: int = 2) -> Any:
+        """Fetch meter hierarchy root nodes from REST API."""
+        return await self._get(
+            "/api/internal/metertree/rootnodes",
+            params={"depth": depth},
+        )
+
+    async def get_meter_tree_children(self, group_id: str | int) -> Any:
+        """Fetch child meters for a given group ID."""
+        return await self._get(
+            "/api/internal/metertree/getchildren",
+            params={"groupId": group_id},
+        )
+
+    async def get_quickgraphs(
+        self,
+        meter_list: list[str] | str,
+        start_date: date,
+        end_date: date,
+        aggregate_groups: bool = True,
+    ) -> Any:
+        """Fetch high-resolution meter data from quickgraphs endpoint."""
+        if isinstance(meter_list, list):
+            meter_list_str = ",".join(meter_list)
+        else:
+            meter_list_str = str(meter_list)
+
+        return await self._get(
+            "/api/internal/graphs/quickgraphs",
+            params={
+                "meterlist": meter_list_str,
+                "startDate": start_date.strftime("%Y-%m-%d"),
+                "endDate": end_date.strftime("%Y-%m-%d"),
+                "aggregateGroups": str(aggregate_groups).lower(),
+            },
+        )

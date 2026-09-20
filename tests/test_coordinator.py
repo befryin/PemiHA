@@ -155,6 +155,9 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elec.today_total, 2.4)
         self.assertEqual(elec.latest_reading, 1.2)
         self.assertEqual(elec.month_total, 37.0)
+        self.assertTrue(len(elec.daily_hourly_history) >= 7)
+        self.assertTrue(len(elec.daily_totals_history) >= 7)
+        self.assertTrue(len(elec.hourly_breakdown_past_days) >= 7)
 
         ev = coordinator.data["EV"]
         self.assertEqual(ev.name, "EV")

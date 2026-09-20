@@ -1,6 +1,7 @@
 """DataUpdateCoordinator for the Provident Energy integration."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import logging
@@ -44,6 +45,9 @@ class ProvidentUtilityData:
     year_total: float = 0.0
     year_monthly: list[float] = field(default_factory=list)
     latest_reading: float = 0.0
+    daily_hourly_history: dict[str, list[float]] = field(default_factory=dict)  # "YYYY-MM-DD" -> 24 hourly floats
+    daily_totals_history: dict[str, float] = field(default_factory=dict)  # "YYYY-MM-DD" -> day total
+    hourly_breakdown_past_days: list[dict[str, Any]] = field(default_factory=list)  # list of day dicts
     last_updated: datetime = field(default_factory=dt_util.utcnow)
 
 
@@ -179,19 +183,53 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     if non_zero_days:
                         yesterday_total = round(non_zero_days[-1], 4)
 
-                # 3. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
+                # 3. Fetch Historical Hourly Breakdown for prior days (past 7 days prior to today)
+                past_dates = [today - timedelta(days=i) for i in range(2, 8)]
+                past_results = await asyncio.gather(
+                    *(self.client.get_chart_data(utility, "day", pd) for pd in past_dates),
+                    return_exceptions=True,
+                )
+
+                daily_hourly_history: dict[str, list[float]] = {}
+                daily_totals_history: dict[str, float] = {}
+
+                # Include yesterday
+                yesterday_date_str = yesterday.isoformat()
+                daily_hourly_history[yesterday_date_str] = yesterday_hourly
+                daily_totals_history[yesterday_date_str] = yesterday_total
+
+                for pd, res in zip(past_dates, past_results):
+                    pd_str = pd.isoformat()
+                    if isinstance(res, dict) and "data" in res:
+                        h_data = res["data"]
+                        daily_hourly_history[pd_str] = h_data
+                        daily_totals_history[pd_str] = round(sum(h_data), 4)
+                    else:
+                        daily_hourly_history[pd_str] = []
+                        daily_totals_history[pd_str] = 0.0
+
+                hourly_breakdown_past_days = [
+                    {
+                        "date": d_str,
+                        "total": daily_totals_history[d_str],
+                        "hourly": daily_hourly_history[d_str],
+                    }
+                    for d_str in sorted(daily_hourly_history.keys(), reverse=True)
+                ]
+
+                # 4. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
                 today_res = await self.client.get_chart_data(utility, "day", today)
                 today_hourly = today_res["data"]
                 today_total = round(sum(today_hourly), 4)
 
-                # 4. Fetch Year-to-Date (12 monthly numbers)
+                # 5. Fetch Year-to-Date (12 monthly numbers)
                 year_res = await self.client.get_chart_data(utility, "year", first_of_year)
                 year_monthly = year_res["data"]
                 year_total = round(sum(year_monthly), 4)
                 if year_total == 0.0 and last_30_days_total > 0:
                     year_total = last_30_days_total
 
-                # 5. Fetch Month-to-Date (Daily breakdown)
+                # 6. Fetch Month-to-Date (Daily breakdown)
                 month_res = await self.client.get_chart_data(utility, "month", first_of_month)
                 month_daily = month_res["data"]
                 month_total = round(sum(month_daily), 4)
@@ -212,10 +250,16 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     yesterday_non_zero = [v for v in yesterday_hourly if v > 0]
                     if yesterday_non_zero:
                         latest_reading = round(yesterday_non_zero[-1], 4)
-                    elif last_30_days_daily:
-                        non_zero_30d = [v for v in last_30_days_daily if v > 0]
-                        if non_zero_30d:
-                            latest_reading = round(non_zero_30d[-1], 4)
+                    else:
+                        for d_str in sorted(daily_hourly_history.keys(), reverse=True):
+                            nz = [v for v in daily_hourly_history[d_str] if v > 0]
+                            if nz:
+                                latest_reading = round(nz[-1], 4)
+                                break
+                        if latest_reading == 0.0 and last_30_days_daily:
+                            non_zero_30d = [v for v in last_30_days_daily if v > 0]
+                            if non_zero_30d:
+                                latest_reading = round(non_zero_30d[-1], 4)
 
                 # Normalize units from any available response
                 raw_units = (
@@ -246,11 +290,14 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     year_total=year_total,
                     year_monthly=year_monthly,
                     latest_reading=latest_reading,
+                    daily_hourly_history=daily_hourly_history,
+                    daily_totals_history=daily_totals_history,
+                    hourly_breakdown_past_days=hourly_breakdown_past_days,
                     last_updated=now,
                 )
 
                 _LOGGER.debug(
-                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s",
+                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s (History: %d days)",
                     utility,
                     portal_total,
                     units,
@@ -260,6 +307,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     units,
                     year_total,
                     units,
+                    len(daily_hourly_history),
                 )
 
             except ProvidentAuthError as err:

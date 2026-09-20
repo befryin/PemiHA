@@ -72,7 +72,16 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
         first_of_month = date(today.year, today.month, 1)
         first_of_year = date(today.year, 1, 1)
 
-        # 4. Test Each Utility
+        # 4. Test Meter Tree Discovery (REST API)
+        print("--- 4. Testing Meter Tree Root Nodes (/api/internal/metertree/rootnodes) ---")
+        try:
+            tree_resp = await client.get("/api/internal/metertree/rootnodes?depth=2")
+            print(f"Status: {tree_resp.status_code}")
+            print(f"Meter Tree Response: {tree_resp.text[:500]}...\n")
+        except Exception as err:
+            print(f"[!] Meter tree request error: {err}\n")
+
+        # 5. Test Each Utility
         for u in utilities:
             print(f"==================================================")
             print(f" TESTING UTILITY: {u}")
@@ -105,14 +114,15 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
             print(f"Status: {month_resp.status_code}")
             print(f"Raw Response: {month_resp.text}")
 
-            # D. GetChartData - Day (Yesterday)
-            print(f"\n[D] GetChartData (period: 'day', start: '{yesterday}') for {u}:")
-            day_resp = await client.post(
-                "/secure/Dashboard/Default.aspx/GetChartData",
-                json={"utility": u, "period": "day", "start": yesterday.strftime("%Y-%m-%d")},
-            )
-            print(f"Status: {day_resp.status_code}")
-            print(f"Raw Response: {day_resp.text}")
+            # D. GetChartData - Past Days Hourly Breakdown
+            print(f"\n[D] Historical Hourly Breakdown (Past 7 Days) for {u}:")
+            for day_offset in range(1, 8):
+                past_d = today - timedelta(days=day_offset)
+                d_resp = await client.post(
+                    "/secure/Dashboard/Default.aspx/GetChartData",
+                    json={"utility": u, "period": "day", "start": past_d.strftime("%Y-%m-%d")},
+                )
+                print(f" - {past_d.strftime('%Y-%m-%d')}: Status {d_resp.status_code}, Raw: {d_resp.text}")
 
             # E. GetChartData - Day (Today)
             print(f"\n[E] GetChartData (period: 'day', start: '{today}') for {u}:")

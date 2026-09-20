@@ -149,6 +149,9 @@ def _build_sensor_descriptions(
                 "latest_hourly_reading": data.latest_reading,
                 "daily_readings_30d": data.last_30_days_daily,
                 "yesterday_hourly_readings": data.yesterday_hourly,
+                "historical_hourly_by_date": data.daily_hourly_history,
+                "historical_daily_totals": data.daily_totals_history,
+                "hourly_breakdown_past_days": data.hourly_breakdown_past_days,
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -165,6 +168,8 @@ def _build_sensor_descriptions(
             attributes_fn=lambda data: {
                 "reading_date": data.yesterday_date,
                 "hourly_readings": data.yesterday_hourly,
+                "historical_hourly_by_date": data.daily_hourly_history,
+                "historical_daily_totals": data.daily_totals_history,
                 "latest_hourly_reading": data.latest_reading,
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,

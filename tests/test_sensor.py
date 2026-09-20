@@ -104,6 +104,12 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
             month_daily=[10.0, 12.0],
             year_total=1254.45,
             year_monthly=[0.0, 0.0, 0.0, 0.0, 0.0, 6.26, 469.75, 479.85, 298.58],
+            daily_hourly_history={"2026-09-19": [0.4, 0.8, 1.6], "2026-09-18": [1.0, 1.2, 0.8]},
+            daily_totals_history={"2026-09-19": 2.8, "2026-09-18": 3.0},
+            hourly_breakdown_past_days=[
+                {"date": "2026-09-19", "total": 2.8, "hourly": [0.4, 0.8, 1.6]},
+                {"date": "2026-09-18", "total": 3.0, "hourly": [1.0, 1.2, 0.8]},
+            ],
             latest_reading=1.6,
             last_updated=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),
         )
@@ -136,11 +142,14 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(primary_sensor.extra_state_attributes["portal_card_total"], 402.0)
         self.assertEqual(primary_sensor.extra_state_attributes["month_to_date"], 298.58)
         self.assertEqual(primary_sensor.extra_state_attributes["year_to_date"], 1254.45)
+        self.assertIn("2026-09-19", primary_sensor.extra_state_attributes["historical_hourly_by_date"])
+        self.assertIn("2026-09-18", primary_sensor.extra_state_attributes["historical_hourly_by_date"])
         self.assertEqual(primary_sensor.unique_id, "test_entry_id_electricity_usage")
 
         # Yesterday sensor
         self.assertEqual(yesterday_sensor.native_value, 12.8)
         self.assertEqual(yesterday_sensor.extra_state_attributes["reading_date"], "2026-09-19")
+        self.assertIn("2026-09-19", yesterday_sensor.extra_state_attributes["historical_hourly_by_date"])
 
         # Last 30 Days sensor
         self.assertEqual(last_30_sensor.native_value, 402.0)
