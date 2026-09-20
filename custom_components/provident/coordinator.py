@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import logging
+import re
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -32,6 +33,7 @@ class ProvidentUtilityData:
 
     name: str
     units: str
+    spot_name: str | None = None
     portal_total: float = 0.0  # 30-day card total matching the web portal homepage
     yesterday_total: float = 0.0
     yesterday_hourly: list[float] = field(default_factory=list)
@@ -49,6 +51,37 @@ class ProvidentUtilityData:
     daily_totals_history: dict[str, float] = field(default_factory=dict)  # "YYYY-MM-DD" -> day total
     hourly_breakdown_past_days: list[dict[str, Any]] = field(default_factory=list)  # list of day dicts
     last_updated: datetime = field(default_factory=dt_util.utcnow)
+
+
+def extract_spot_info(name: str) -> tuple[str, str | None]:
+    """Extract clean base utility name and parking spot identifier if present.
+
+    Examples:
+        'EV - Spot P2-14' -> ('EV', 'Spot P2-14')
+        'EV Charging (Spot 42)' -> ('EV Charging', 'Spot 42')
+        'EV [P1-102]' -> ('EV', 'P1-102')
+        'EV Spot #15' -> ('EV', 'Spot #15')
+        'Electricity' -> ('Electricity', None)
+    """
+    if not name:
+        return name, None
+
+    patterns = [
+        r"[\(\[\-–—:]?\s*(spot\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:]?\s*(stall\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:]?\s*(parking\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[]\s*([pP]\d+[-_]?\d+)\s*[\)\]]",
+        r"[-–—:]\s*([pP]\d+[-_]?\d+)\s*$",
+    ]
+
+    for pat in patterns:
+        match = re.search(pat, name, re.IGNORECASE)
+        if match:
+            spot = match.group(1).strip()
+            clean_name = re.sub(pat, "", name, flags=re.IGNORECASE).strip(" -–—:()[]")
+            return clean_name or name, spot
+
+    return name, None
 
 
 def extract_meters_from_tree(tree_data: Any) -> list[dict[str, str]]:
@@ -307,12 +340,16 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
                 units = normalize_unit(raw_units, utility)
 
+                # Extract parking spot identifier if present in meter name
+                clean_name, spot_name = extract_spot_info(utility)
+
                 # Portal total: the prominent number from the portal card (e.g. 402 kWh)
                 portal_total = last_30_days_total if last_30_days_total > 0 else (month_total or year_total or yesterday_total)
 
                 data_by_utility[utility] = ProvidentUtilityData(
                     name=utility,
                     units=units,
+                    spot_name=spot_name,
                     portal_total=portal_total,
                     yesterday_total=yesterday_total,
                     yesterday_hourly=yesterday_hourly,

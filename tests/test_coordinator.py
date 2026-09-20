@@ -65,6 +65,26 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_unit(None, "Cooling"), "kWh")
         self.assertEqual(normalize_unit(None, "Heating"), "kWh")
 
+    def test_extract_spot_info(self):
+        """Test parking spot extraction from utility/meter names."""
+        from custom_components.provident.coordinator import extract_spot_info
+
+        clean, spot = extract_spot_info("EV - Spot P2-14")
+        self.assertEqual(clean, "EV")
+        self.assertEqual(spot, "Spot P2-14")
+
+        clean, spot = extract_spot_info("EV Charging (Spot 42)")
+        self.assertEqual(clean, "EV Charging")
+        self.assertEqual(spot, "Spot 42")
+
+        clean, spot = extract_spot_info("EV [P1-102]")
+        self.assertEqual(clean, "EV")
+        self.assertEqual(spot, "P1-102")
+
+        clean, spot = extract_spot_info("Electricity")
+        self.assertEqual(clean, "Electricity")
+        self.assertIsNone(spot)
+
     @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_data_fetch_success(self, mock_client_cls):
         """Test successful data update coordinator refresh."""
