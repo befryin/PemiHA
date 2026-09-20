@@ -51,6 +51,44 @@ class ProvidentUtilityData:
     last_updated: datetime = field(default_factory=dt_util.utcnow)
 
 
+def extract_meters_from_tree(tree_data: Any) -> list[dict[str, str]]:
+    """Recursively extract all meter and group descriptors from meter tree."""
+    meters: list[dict[str, str]] = []
+    if isinstance(tree_data, list):
+        for item in tree_data:
+            meters.extend(extract_meters_from_tree(item))
+    elif isinstance(tree_data, dict):
+        node_id = str(tree_data.get("id") or tree_data.get("Id") or "")
+        node_text = str(
+            tree_data.get("text")
+            or tree_data.get("Text")
+            or tree_data.get("name")
+            or tree_data.get("Name")
+            or ""
+        )
+        node_type = str(tree_data.get("type") or tree_data.get("Type") or "")
+
+        if node_text and node_id and node_id.lower() != "root":
+            meters.append(
+                {
+                    "id": node_id,
+                    "name": node_text.strip(),
+                    "type": node_type,
+                }
+            )
+
+        children = (
+            tree_data.get("children")
+            or tree_data.get("Children")
+            or tree_data.get("childNodes")
+            or []
+        )
+        if isinstance(children, list):
+            for child in children:
+                meters.extend(extract_meters_from_tree(child))
+    return meters
+
+
 def normalize_unit(unit_str: str | None, utility_name: str) -> str:
     """Normalize reported unit string into standard Home Assistant units."""
     if not unit_str:
@@ -152,6 +190,17 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
             raise UpdateFailed(f"Error fetching utility list: {err}") from err
         except Exception as err:
             raise UpdateFailed(f"Unexpected error fetching utility list: {err}") from err
+
+        # Check meter tree to discover specific sub-meters (e.g. EV Charger 1, EV Charger 2)
+        try:
+            tree_data = await self.client.get_meter_tree(depth=2)
+            discovered_meters = extract_meters_from_tree(tree_data)
+            for m in discovered_meters:
+                name = m.get("name")
+                if name and name not in utilities and name.lower() not in ("root", "meters", "all"):
+                    utilities.append(name)
+        except Exception as err:
+            _LOGGER.debug("Meter tree discovery skipped or returned: %s", err)
 
         if not utilities:
             _LOGGER.warning("No utilities found for Provident account %s", self.username)
