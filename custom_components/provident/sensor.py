@@ -134,7 +134,7 @@ def _build_sensor_descriptions(
         # 1. Primary Portal Meter Sensor (Matches Portal Card value e.g. 402 kWh Electricity, 116 kWh EV)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_PRIMARY,
-            name=f"{utility_name}",
+            name=None,
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL,
             native_unit_of_measurement=native_unit,
@@ -160,7 +160,7 @@ def _build_sensor_descriptions(
         # 2. Yesterday (Previous Day completed 24-hour reading)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_YESTERDAY,
-            name=f"{utility_name} Yesterday",
+            name="Yesterday",
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL,
             native_unit_of_measurement=native_unit,
@@ -180,7 +180,7 @@ def _build_sensor_descriptions(
         # 3. Last 30 Days (Direct 30-Day Homepage Card)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_LAST_30_DAYS,
-            name=f"{utility_name} Last 30 Days",
+            name="Last 30 Days",
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL,
             native_unit_of_measurement=native_unit,
@@ -195,7 +195,7 @@ def _build_sensor_descriptions(
         # 4. This Month (Month-to-Date)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_MONTH,
-            name=f"{utility_name} This Month",
+            name="This Month",
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL_INCREASING,
             native_unit_of_measurement=native_unit,
@@ -210,7 +210,7 @@ def _build_sensor_descriptions(
         # 5. This Year (Year-to-Date)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_YEAR,
-            name=f"{utility_name} This Year",
+            name="This Year",
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL_INCREASING,
             native_unit_of_measurement=native_unit,
@@ -225,7 +225,7 @@ def _build_sensor_descriptions(
         # 6. Today (Current Day - populated as posted)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_TODAY,
-            name=f"{utility_name} Today",
+            name="Today",
             device_class=dev_class,
             state_class=SensorStateClass.TOTAL,
             native_unit_of_measurement=native_unit,
@@ -240,7 +240,7 @@ def _build_sensor_descriptions(
         # 7. Latest Reading
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_LATEST,
-            name=f"{utility_name} Latest Reading",
+            name="Latest Reading",
             device_class=dev_class,
             state_class=SensorStateClass.MEASUREMENT,
             native_unit_of_measurement=native_unit,
