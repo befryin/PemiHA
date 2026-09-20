@@ -42,6 +42,8 @@ from .coordinator import ProvidentDataUpdateCoordinator, ProvidentUtilityData
 
 _LOGGER = logging.getLogger(__name__)
 
+SENSOR_TYPE_PRIMARY = "usage"
+
 
 @dataclass(frozen=True, kw_only=True)
 class ProvidentSensorEntityDescription(SensorEntityDescription):
@@ -129,7 +131,29 @@ def _build_sensor_descriptions(
     icon = UTILITY_ICONS.get(utility_name, DEFAULT_ICON)
 
     return [
-        # 1. Yesterday (Previous Day - Default for daily stats due to 1-day delay)
+        # 1. Primary Portal Meter Sensor (Matches Portal Card value e.g. 402 kWh Electricity, 116 kWh EV)
+        ProvidentSensorEntityDescription(
+            key=SENSOR_TYPE_PRIMARY,
+            name=f"{utility_name}",
+            device_class=dev_class,
+            state_class=SensorStateClass.TOTAL,
+            native_unit_of_measurement=native_unit,
+            icon=icon,
+            value_fn=lambda data: data.portal_total,
+            attributes_fn=lambda data: {
+                "portal_card_total": data.portal_total,
+                "last_30_days_total": data.last_30_days_total,
+                "yesterday_total": data.yesterday_total,
+                "month_to_date": data.month_total,
+                "year_to_date": data.year_total,
+                "latest_hourly_reading": data.latest_reading,
+                "daily_readings_30d": data.last_30_days_daily,
+                "yesterday_hourly_readings": data.yesterday_hourly,
+                "meter_units": data.units,
+                "last_updated": data.last_updated.isoformat() if data.last_updated else None,
+            },
+        ),
+        # 2. Yesterday (Previous Day completed 24-hour reading)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_YESTERDAY,
             name=f"{utility_name} Yesterday",
@@ -146,22 +170,7 @@ def _build_sensor_descriptions(
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
         ),
-        # 2. Today (Current Day)
-        ProvidentSensorEntityDescription(
-            key=SENSOR_TYPE_TODAY,
-            name=f"{utility_name} Today",
-            device_class=dev_class,
-            state_class=SensorStateClass.TOTAL,
-            native_unit_of_measurement=native_unit,
-            icon=icon,
-            value_fn=lambda data: data.today_total,
-            attributes_fn=lambda data: {
-                "hourly_readings": data.today_hourly,
-                "meter_units": data.units,
-                "last_updated": data.last_updated.isoformat() if data.last_updated else None,
-            },
-        ),
-        # 3. Last 30 Days (Matches Provident Homepage Breakdown)
+        # 3. Last 30 Days (Direct 30-Day Homepage Card)
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_LAST_30_DAYS,
             name=f"{utility_name} Last 30 Days",
@@ -206,7 +215,22 @@ def _build_sensor_descriptions(
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
         ),
-        # 6. Latest Reading
+        # 6. Today (Current Day - populated as posted)
+        ProvidentSensorEntityDescription(
+            key=SENSOR_TYPE_TODAY,
+            name=f"{utility_name} Today",
+            device_class=dev_class,
+            state_class=SensorStateClass.TOTAL,
+            native_unit_of_measurement=native_unit,
+            icon=icon,
+            value_fn=lambda data: data.today_total,
+            attributes_fn=lambda data: {
+                "hourly_readings": data.today_hourly,
+                "meter_units": data.units,
+                "last_updated": data.last_updated.isoformat() if data.last_updated else None,
+            },
+        ),
+        # 7. Latest Reading
         ProvidentSensorEntityDescription(
             key=SENSOR_TYPE_LATEST,
             name=f"{utility_name} Latest Reading",

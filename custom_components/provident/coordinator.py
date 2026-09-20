@@ -31,6 +31,7 @@ class ProvidentUtilityData:
 
     name: str
     units: str
+    portal_total: float = 0.0  # 30-day card total matching the web portal homepage
     yesterday_total: float = 0.0
     yesterday_hourly: list[float] = field(default_factory=list)
     yesterday_date: str = ""
@@ -167,25 +168,40 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 last_30_days_daily = card_data["data"]
                 last_30_days_total = card_data["total"]
 
-                # 2. Fetch Yesterday (Previous Day - primary due to 1-day reporting delay)
+                # 2. Fetch Yesterday (Previous Day - 24 hourly readings)
                 yesterday_res = await self.client.get_chart_data(utility, "day", yesterday)
                 yesterday_hourly = yesterday_res["data"]
                 yesterday_total = round(sum(yesterday_hourly), 4)
+
+                # If yesterday hourly sum is 0 but 30-day card has daily points, fallback to latest non-zero daily reading
+                if yesterday_total == 0.0 and last_30_days_daily:
+                    non_zero_days = [v for v in last_30_days_daily if v > 0]
+                    if non_zero_days:
+                        yesterday_total = round(non_zero_days[-1], 4)
 
                 # 3. Fetch Today (Hourly breakdown - may be 0/empty due to 1-day delay)
                 today_res = await self.client.get_chart_data(utility, "day", today)
                 today_hourly = today_res["data"]
                 today_total = round(sum(today_hourly), 4)
 
-                # 4. Fetch Month-to-Date (Daily breakdown)
-                month_res = await self.client.get_chart_data(utility, "month", first_of_month)
-                daily_data = month_res["data"]
-                month_total = round(sum(daily_data), 4)
-
-                # 5. Fetch Year (Monthly breakdown)
+                # 4. Fetch Year-to-Date (12 monthly numbers)
                 year_res = await self.client.get_chart_data(utility, "year", first_of_year)
-                monthly_data = year_res["data"]
-                year_total = round(sum(monthly_data), 4)
+                year_monthly = year_res["data"]
+                year_total = round(sum(year_monthly), 4)
+                if year_total == 0.0 and last_30_days_total > 0:
+                    year_total = last_30_days_total
+
+                # 5. Fetch Month-to-Date (Daily breakdown)
+                month_res = await self.client.get_chart_data(utility, "month", first_of_month)
+                month_daily = month_res["data"]
+                month_total = round(sum(month_daily), 4)
+
+                # If month_total is 0 but year_monthly has current month's entry, use it
+                current_month_idx = today.month - 1
+                if month_total == 0.0 and year_monthly and len(year_monthly) > current_month_idx:
+                    current_month_val = year_monthly[current_month_idx]
+                    if current_month_val > 0:
+                        month_total = round(current_month_val, 4)
 
                 # Determine latest reading
                 latest_reading = 0.0
@@ -196,10 +212,10 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     yesterday_non_zero = [v for v in yesterday_hourly if v > 0]
                     if yesterday_non_zero:
                         latest_reading = round(yesterday_non_zero[-1], 4)
-                    elif yesterday_hourly:
-                        latest_reading = round(yesterday_hourly[-1], 4)
                     elif last_30_days_daily:
-                        latest_reading = round(last_30_days_daily[-1], 4)
+                        non_zero_30d = [v for v in last_30_days_daily if v > 0]
+                        if non_zero_30d:
+                            latest_reading = round(non_zero_30d[-1], 4)
 
                 # Normalize units from any available response
                 raw_units = (
@@ -211,9 +227,13 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
                 units = normalize_unit(raw_units, utility)
 
+                # Portal total: the prominent number from the portal card (e.g. 402 kWh)
+                portal_total = last_30_days_total if last_30_days_total > 0 else (month_total or year_total or yesterday_total)
+
                 data_by_utility[utility] = ProvidentUtilityData(
                     name=utility,
                     units=units,
+                    portal_total=portal_total,
                     yesterday_total=yesterday_total,
                     yesterday_hourly=yesterday_hourly,
                     yesterday_date=yesterday.isoformat(),
@@ -222,19 +242,19 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     last_30_days_total=last_30_days_total,
                     last_30_days_daily=last_30_days_daily,
                     month_total=month_total,
-                    month_daily=daily_data,
+                    month_daily=month_daily,
                     year_total=year_total,
-                    year_monthly=monthly_data,
+                    year_monthly=year_monthly,
                     latest_reading=latest_reading,
                     last_updated=now,
                 )
 
                 _LOGGER.debug(
-                    "Fetched %s: Yesterday=%.3f %s, Last30Days=%.3f %s, Month=%.3f %s, Year=%.3f %s",
+                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s",
                     utility,
-                    yesterday_total,
+                    portal_total,
                     units,
-                    last_30_days_total,
+                    yesterday_total,
                     units,
                     month_total,
                     units,

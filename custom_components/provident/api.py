@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -19,7 +20,7 @@ DEFAULT_HEADERS = {
 
 
 def _unwrap_response(response: httpx.Response) -> Any:
-    """Unwrap ASP.NET AJAX PageMethod response format."""
+    """Unwrap ASP.NET AJAX PageMethod response format with recursive parsing."""
     if not response.text or not response.text.strip():
         return None
     try:
@@ -33,11 +34,93 @@ def _unwrap_response(response: httpx.Response) -> Any:
             if not inner.strip():
                 return {}
             try:
-                return json.loads(inner)
+                parsed = json.loads(inner)
+                return parsed
             except Exception:
                 return inner
         return inner
     return data
+
+
+def extract_numeric_list(data: Any) -> list[float]:
+    """Extract list of numbers from any structure (graphData, data, points, series, or list)."""
+    if isinstance(data, list):
+        out: list[float] = []
+        for item in data:
+            if isinstance(item, (int, float)):
+                out.append(float(item))
+            elif isinstance(item, dict):
+                found = False
+                for k in ("y", "value", "val", "v", "usage", "consumption", "Total", "total"):
+                    if k in item and item[k] is not None:
+                        try:
+                            out.append(float(item[k]))
+                            found = True
+                            break
+                        except (ValueError, TypeError):
+                            pass
+                if not found:
+                    out.append(0.0)
+            elif isinstance(item, str):
+                try:
+                    out.append(float(item.replace(",", "").strip()))
+                except ValueError:
+                    out.append(0.0)
+        return out
+    if isinstance(data, dict):
+        for k in (
+            "graphData", "GraphData", "data", "Data", "values", "Values",
+            "points", "Points", "series", "Series", "readings", "Readings"
+        ):
+            if k in data and isinstance(data[k], list):
+                return extract_numeric_list(data[k])
+    return []
+
+
+def extract_total_and_units(data: Any) -> tuple[float, str]:
+    """Extract total usage and units from any dict structure with case-insensitive fallback."""
+    if not isinstance(data, dict):
+        if isinstance(data, (int, float)):
+            return float(data), ""
+        return 0.0, ""
+
+    total = 0.0
+    units = ""
+
+    # 1. Search for units
+    for k in ("units", "Units", "unit", "Unit", "uom", "UOM", "meterUnits"):
+        if k in data and data[k]:
+            units = str(data[k]).strip()
+            break
+
+    # 2. Search for explicit total / usage fields
+    found_total = False
+    for k in (
+        "total", "Total", "usage", "Usage", "consumption", "Consumption",
+        "value", "Value", "current", "Current", "amount", "Amount", "reading", "Reading"
+    ):
+        if k in data and data[k] is not None:
+            try:
+                val_str = str(data[k]).replace(",", "").strip()
+                # Split any combined strings like "402 kWh" or "3.136 m3*"
+                val_clean = re.sub(r"[^\d.-]", " ", val_str).split()
+                if val_clean:
+                    total = float(val_clean[0])
+                    found_total = True
+                    # Check if unit was in the string e.g. "402 kWh"
+                    parts = val_str.replace("*", "").split()
+                    if len(parts) > 1 and not units:
+                        units = parts[1]
+                    break
+            except (ValueError, TypeError, IndexError):
+                pass
+
+    # 3. If no explicit total found, sum up the numeric array
+    num_list = extract_numeric_list(data)
+    if not found_total and num_list:
+        total = round(sum(num_list), 4)
+
+    return total, units
 
 
 class ProvidentAPIError(Exception):
@@ -122,43 +205,20 @@ class ProvidentAPIClient:
             "/secure/Dashboard/Default.aspx/UpdateCard",
             {"utility": utility, "period": period},
         )
-        result = {
-            "total": 0.0,
-            "units": "",
-            "data": [],
-            "last_updated": None,
+        total, units = extract_total_and_units(data)
+        data_list = extract_numeric_list(data)
+
+        last_updated = None
+        if isinstance(data, dict):
+            last_updated = data.get("lastUpdated") or data.get("LastUpdated") or data.get("date")
+
+        return {
+            "total": total,
+            "units": units,
+            "data": data_list,
+            "last_updated": last_updated,
             "raw": data if isinstance(data, dict) else {},
         }
-        if isinstance(data, dict):
-            # Parse graphData / data array
-            raw_list = data.get("graphData") or data.get("data") or []
-            data_list = []
-            for val in raw_list:
-                try:
-                    data_list.append(float(val))
-                except (ValueError, TypeError):
-                    data_list.append(0.0)
-            result["data"] = data_list
-
-            # Parse total consumption
-            if "total" in data and data["total"] is not None:
-                try:
-                    result["total"] = float(data["total"])
-                except (ValueError, TypeError):
-                    result["total"] = round(sum(data_list), 4)
-            elif "usage" in data and data["usage"] is not None:
-                try:
-                    result["total"] = float(data["usage"])
-                except (ValueError, TypeError):
-                    result["total"] = round(sum(data_list), 4)
-            else:
-                result["total"] = round(sum(data_list), 4)
-
-            # Units & metadata
-            result["units"] = str(data.get("units") or "")
-            result["last_updated"] = data.get("lastUpdated") or data.get("date")
-
-        return result
 
     async def get_chart_data(self, utility: str, period: str, start: date) -> dict[str, Any]:
         """Fetch chart breakdown data for day/month/year."""
@@ -167,22 +227,15 @@ class ProvidentAPIClient:
             "/secure/Dashboard/Default.aspx/GetChartData",
             {"utility": utility, "period": period, "start": start_str},
         )
-        result = {
-            "error": False,
-            "units": "",
-            "data": [],
-        }
+        total, units = extract_total_and_units(data)
+        data_list = extract_numeric_list(data)
+        error = False
         if isinstance(data, dict):
-            result["error"] = bool(data.get("error", False))
-            result["units"] = str(data.get("units") or "")
+            error = bool(data.get("error", False))
 
-            raw_list = data.get("graphData") or data.get("data") or []
-            data_list = []
-            for val in raw_list:
-                try:
-                    data_list.append(float(val))
-                except (ValueError, TypeError):
-                    data_list.append(0.0)
-            result["data"] = data_list
-
-        return result
+        return {
+            "error": error,
+            "total": total,
+            "units": units,
+            "data": data_list,
+        }

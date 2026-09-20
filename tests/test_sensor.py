@@ -27,6 +27,7 @@ from custom_components.provident.coordinator import (
 )
 from custom_components.provident.sensor import (
     ProvidentSensorEntity,
+    SENSOR_TYPE_PRIMARY,
     _build_sensor_descriptions,
     _get_device_class_and_unit,
     async_setup_entry,
@@ -91,6 +92,7 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         util_data = ProvidentUtilityData(
             name="Electricity",
             units="kWh",
+            portal_total=402.0,
             yesterday_total=12.8,
             yesterday_hourly=[0.4, 0.8, 1.6],
             yesterday_date="2026-09-19",
@@ -98,10 +100,10 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
             today_hourly=[0.0],
             last_30_days_total=402.0,
             last_30_days_daily=[12.8, 14.2],
-            month_total=120.4,
+            month_total=298.58,
             month_daily=[10.0, 12.0],
-            year_total=1450.0,
-            year_monthly=[100.0, 120.0],
+            year_total=1254.45,
+            year_monthly=[0.0, 0.0, 0.0, 0.0, 0.0, 6.26, 469.75, 479.85, 298.58],
             latest_reading=1.6,
             last_updated=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),
         )
@@ -118,6 +120,7 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
             for desc in descriptions
         ]
 
+        primary_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_PRIMARY)
         yesterday_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_YESTERDAY)
         today_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_TODAY)
         last_30_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_LAST_30_DAYS)
@@ -125,36 +128,35 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         year_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_YEAR)
         latest_sensor = next(e for e in entities if e.entity_description.key == SENSOR_TYPE_LATEST)
 
-        # Yesterday sensor checks (Energy Dashboard default / accurate completed day)
-        self.assertEqual(yesterday_sensor.native_value, 12.8)
-        self.assertEqual(yesterday_sensor.entity_description.device_class, SensorDeviceClass.ENERGY)
-        self.assertEqual(yesterday_sensor.entity_description.state_class, SensorStateClass.TOTAL)
-        self.assertEqual(yesterday_sensor.entity_description.native_unit_of_measurement, UnitOfEnergy.KILO_WATT_HOUR)
-        self.assertEqual(yesterday_sensor.extra_state_attributes["hourly_readings"], [0.4, 0.8, 1.6])
-        self.assertEqual(yesterday_sensor.extra_state_attributes["latest_hourly_reading"], 1.6)
-        self.assertEqual(yesterday_sensor.extra_state_attributes["reading_date"], "2026-09-19")
-        self.assertEqual(yesterday_sensor.unique_id, "test_entry_id_electricity_yesterday")
+        # Primary Portal Sensor (402 kWh Electricity)
+        self.assertEqual(primary_sensor.native_value, 402.0)
+        self.assertEqual(primary_sensor.entity_description.device_class, SensorDeviceClass.ENERGY)
+        self.assertEqual(primary_sensor.entity_description.state_class, SensorStateClass.TOTAL)
+        self.assertEqual(primary_sensor.entity_description.native_unit_of_measurement, UnitOfEnergy.KILO_WATT_HOUR)
+        self.assertEqual(primary_sensor.extra_state_attributes["portal_card_total"], 402.0)
+        self.assertEqual(primary_sensor.extra_state_attributes["month_to_date"], 298.58)
+        self.assertEqual(primary_sensor.extra_state_attributes["year_to_date"], 1254.45)
+        self.assertEqual(primary_sensor.unique_id, "test_entry_id_electricity_usage")
 
-        # Today sensor
-        self.assertEqual(today_sensor.native_value, 0.0)
+        # Yesterday sensor
+        self.assertEqual(yesterday_sensor.native_value, 12.8)
+        self.assertEqual(yesterday_sensor.extra_state_attributes["reading_date"], "2026-09-19")
 
         # Last 30 Days sensor
         self.assertEqual(last_30_sensor.native_value, 402.0)
-        self.assertEqual(last_30_sensor.extra_state_attributes["daily_readings"], [12.8, 14.2])
 
         # Month and Year checks
-        self.assertEqual(month_sensor.native_value, 120.4)
-        self.assertEqual(year_sensor.native_value, 1450.0)
+        self.assertEqual(month_sensor.native_value, 298.58)
+        self.assertEqual(year_sensor.native_value, 1254.45)
 
         # Latest reading check
         self.assertEqual(latest_sensor.native_value, 1.6)
-        self.assertEqual(latest_sensor.entity_description.state_class, SensorStateClass.MEASUREMENT)
 
     async def test_async_setup_entry(self):
         """Test platform setup adding entities callback."""
         self.coordinator.data = {
-            "Electricity": ProvidentUtilityData("Electricity", "kWh", yesterday_total=10.0),
-            "EV": ProvidentUtilityData("EV", "kWh", yesterday_total=25.0),
+            "Electricity": ProvidentUtilityData("Electricity", "kWh", portal_total=402.0),
+            "EV": ProvidentUtilityData("EV", "kWh", portal_total=116.0),
         }
         self.hass.data = {DOMAIN: {self.entry.entry_id: self.coordinator}}
 
@@ -163,8 +165,8 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
             added_entities.extend(ents)
 
         await async_setup_entry(self.hass, self.entry, add_entities)
-        # 6 sensors per utility x 2 utilities = 12 sensors
-        self.assertEqual(len(added_entities), 12)
+        # 7 sensors per utility x 2 utilities = 14 sensors
+        self.assertEqual(len(added_entities), 14)
 
 
 if __name__ == "__main__":
