@@ -1,12 +1,17 @@
 """Standalone Diagnostic Script for Provident Energy (MeterConnex).
 
 Run this script to test authentication and inspect the raw API responses:
-    python3 test_provident.py <username> <password> [base_url]
+    python3 test_provident.py
+(It will prompt securely for your username and password)
+
+Or pass arguments with quotes:
+    python3 test_provident.py "your_username" "your_password"
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
+import getpass
 import json
 import sys
 
@@ -22,7 +27,7 @@ DEFAULT_HEADERS = {
 
 
 async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_BASE_URL) -> None:
-    print(f"[*] Testing connection to {base_url} for user: {username} ...\n")
+    print(f"\n[*] Testing connection to {base_url} for user: {username} ...\n")
 
     async with httpx.AsyncClient(base_url=base_url, headers=DEFAULT_HEADERS, timeout=30.0, follow_redirects=True) as client:
         # 1. Login
@@ -114,12 +119,14 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python3 test_provident.py <username> <password> [base_url]")
-        sys.exit(1)
-
-    user = sys.argv[1]
-    pwd = sys.argv[2]
-    url = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_BASE_URL
+    if len(sys.argv) >= 3:
+        user = sys.argv[1]
+        pwd = sys.argv[2]
+        url = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_BASE_URL
+    else:
+        print("--- Provident Diagnostics Login ---")
+        user = input("Username / Account ID: ").strip()
+        pwd = getpass.getpass("Password: ")
+        url = input(f"Portal URL [{DEFAULT_BASE_URL}]: ").strip() or DEFAULT_BASE_URL
 
     asyncio.run(run_diagnostics(user, pwd, url))
