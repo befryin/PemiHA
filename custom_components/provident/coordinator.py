@@ -480,6 +480,6 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 ]
 
         if update_entities and self.data:
-            self.async_set_updated_data(self.data)
+            self.async_set_updated_data(dict(self.data))
 
         return results_by_utility
