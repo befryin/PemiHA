@@ -42,6 +42,8 @@ class TestProvidentInit(unittest.IsolatedAsyncioTestCase):
         mock_client_cls.return_value = mock_client
         mock_client.is_authenticated = True
         mock_client.check_login.return_value = True
+        mock_client.get_meter_hierarchy.return_value = {"groups": {}, "meters": {}, "meter_list": []}
+        mock_client.get_quickgraphs.return_value = []
         mock_client.get_utilities.return_value = ["Electricity"]
         mock_client.get_card_data.return_value = {"total": 400.0, "units": "kWh", "data": []}
         mock_client.get_chart_data.return_value = {"error": False, "units": "kWh", "data": [0.5, 0.5]}

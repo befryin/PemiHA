@@ -72,14 +72,99 @@ async def run_diagnostics(username: str, password: str, base_url: str = DEFAULT_
         first_of_month = date(today.year, today.month, 1)
         first_of_year = date(today.year, 1, 1)
 
-        # 4. Test Meter Tree Discovery (REST API)
-        print("--- 4. Testing Meter Tree Root Nodes (/api/internal/metertree/rootnodes) ---")
+        # 4. Test Meter Tree & QuickGraphs (Parking Spot Breakdown)
+        print("--- 4. Testing Meter Tree & QuickGraphs for Spot-Level Breakdown ---")
         try:
-            tree_resp = await client.get("/api/internal/metertree/rootnodes?depth=2")
+            # Initialize QuickGraphs session
+            qg_page = await client.get("/secure/QuickGraphs.aspx")
+            print(f"QuickGraphs Page GET Status: {qg_page.status_code}")
+
+            # A. Root Nodes
+            print("\n[A] Meter Tree Root Nodes (/api/internal/metertree/rootnodes?depth=2):")
+            tree_resp = await client.get(
+                "/api/internal/metertree/rootnodes?depth=2",
+                headers={"Referer": f"{base_url}/secure/QuickGraphs.aspx"},
+            )
             print(f"Status: {tree_resp.status_code}")
-            print(f"Meter Tree Response: {tree_resp.text[:500]}...\n")
+            try:
+                tree_json = tree_resp.json()
+                print("Root Nodes JSON:", json.dumps(tree_json, indent=2))
+            except Exception:
+                print("Raw Root Nodes:", tree_resp.text)
+                tree_json = []
+
+            # B. Check for groups and fetch children
+            group_ids = []
+            meter_ids = []
+
+            def find_nodes(node_list):
+                if isinstance(node_list, dict):
+                    node_list = [node_list]
+                for n in node_list:
+                    nid = str(n.get("id") or n.get("Id") or "")
+                    ntype = str(n.get("type") or n.get("Type") or "").lower()
+                    if "group" in ntype or n.get("hasChildren") or n.get("HasChildren") or (nid.isdigit()):
+                        clean_gid = nid.replace("GROUP:", "").replace("group:", "")
+                        if clean_gid and clean_gid not in group_ids:
+                            group_ids.append(clean_gid)
+                    elif nid and nid.lower() != "root":
+                        meter_ids.append(nid)
+
+                    children = n.get("children") or n.get("Children") or []
+                    if isinstance(children, list) and children:
+                        find_nodes(children)
+
+            if isinstance(tree_json, list):
+                find_nodes(tree_json)
+
+            print(f"\nDiscovered Group IDs: {group_ids}")
+            print(f"Discovered Meter IDs: {meter_ids}")
+
+            for gid in group_ids:
+                if gid and gid.lower() != "root":
+                    print(f"\n[B] Child Nodes for Group {gid} (/api/internal/metertree/getchildren?groupId={gid}):")
+                    c_resp = await client.get(
+                        f"/api/internal/metertree/getchildren?groupId={gid}",
+                        headers={"Referer": f"{base_url}/secure/QuickGraphs.aspx"},
+                    )
+                    print(f"Status: {c_resp.status_code}")
+                    try:
+                        c_json = c_resp.json()
+                        print(f"Group {gid} Children JSON:", json.dumps(c_json, indent=2))
+                        if isinstance(c_json, list):
+                            for cn in c_json:
+                                cn_id = str(cn.get("id") or cn.get("Id") or "")
+                                if cn_id and cn_id not in meter_ids:
+                                    meter_ids.append(cn_id)
+                    except Exception:
+                        print("Raw Children:", c_resp.text)
+
+            # C. Query QuickGraphs with aggregateGroups=false
+            all_meters_str = ",".join(dict.fromkeys(meter_ids + [f"GROUP:{g}" for g in group_ids]))
+            if not all_meters_str:
+                all_meters_str = "MP:857718,GROUP:171467,MP:585550,MP:857717,MP:579487,MP:579552,MP:579659,MP:579724"
+
+            print(f"\n[C] Querying QuickGraphs (/api/internal/graphs/quickgraphs) with aggregateGroups=false:")
+            print(f"Meterlist: {all_meters_str}")
+            qg_resp = await client.get(
+                "/api/internal/graphs/quickgraphs",
+                params={
+                    "meterlist": all_meters_str,
+                    "startDate": yesterday.strftime("%Y-%m-%d"),
+                    "endDate": today.strftime("%Y-%m-%d"),
+                    "aggregateGroups": "false",
+                },
+                headers={"Referer": f"{base_url}/secure/QuickGraphs.aspx"},
+            )
+            print(f"Status: {qg_resp.status_code}")
+            try:
+                qg_data = qg_resp.json()
+                print("QuickGraphs (Yesterday Breakdown) JSON:", json.dumps(qg_data, indent=2)[:2500])
+            except Exception:
+                print("Raw QuickGraphs Response:", qg_resp.text[:2500])
+
         except Exception as err:
-            print(f"[!] Meter tree request error: {err}\n")
+            print(f"[!] Meter tree / QuickGraphs error: {err}\n")
 
         # 5. Test Each Utility
         for u in utilities:

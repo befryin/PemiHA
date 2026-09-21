@@ -15,7 +15,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import homeassistant.util.dt as dt_util
 
-from .api import ProvidentAPIClient, ProvidentAuthError, ProvidentConnError, ProvidentAPIError
+from .api import (
+    ProvidentAPIClient,
+    ProvidentAuthError,
+    ProvidentConnError,
+    ProvidentAPIError,
+    parse_quickgraphs_response,
+)
 from .const import (
     CONF_BASE_URL,
     CONF_SCAN_INTERVAL,
@@ -34,6 +40,7 @@ class ProvidentUtilityData:
     name: str
     units: str
     spot_name: str | None = None
+    spots: dict[str, dict[str, Any]] = field(default_factory=dict)
     portal_total: float = 0.0  # 30-day card total matching the web portal homepage
     yesterday_total: float = 0.0
     yesterday_hourly: list[float] = field(default_factory=list)
@@ -224,16 +231,22 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
         except Exception as err:
             raise UpdateFailed(f"Unexpected error fetching utility list: {err}") from err
 
-        # Check meter tree to discover specific sub-meters (e.g. EV Charger 1, EV Charger 2)
+        hierarchy: dict[str, Any] = {}
         try:
-            tree_data = await self.client.get_meter_tree(depth=2)
-            discovered_meters = extract_meters_from_tree(tree_data)
-            for m in discovered_meters:
-                name = m.get("name")
-                if name and name not in utilities and name.lower() not in ("root", "meters", "all"):
-                    utilities.append(name)
+            res = await self.client.get_meter_hierarchy()
+            if isinstance(res, dict):
+                hierarchy = res
+            discovered_meters = hierarchy.get("meters", {})
+            if isinstance(discovered_meters, dict):
+                for m_id, m_info in discovered_meters.items():
+                    if isinstance(m_info, dict):
+                        name = m_info.get("name")
+                        if name and name not in utilities and name.lower() not in ("root", "meters", "all"):
+                            clean, spot = extract_spot_info(name)
+                            if not spot and name not in utilities:
+                                utilities.append(name)
         except Exception as err:
-            _LOGGER.debug("Meter tree discovery skipped or returned: %s", err)
+            _LOGGER.debug("Meter tree hierarchy discovery skipped or returned: %s", err)
 
         if not utilities:
             _LOGGER.warning("No utilities found for Provident account %s", self.username)
@@ -412,10 +425,62 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     raise UpdateFailed(f"Failed to fetch meter data for {utility}: {err}") from err
             except Exception as err:
                 _LOGGER.error("Unexpected error fetching meter data for %s: %s", utility, err)
-                if self.data and utility in self.data:
-                    data_by_utility[utility] = self.data[utility]
-                else:
-                    raise UpdateFailed(f"Unexpected error for {utility}: {err}") from err
+        # 6. Fetch spot-level breakdown via QuickGraphs (as observed in HAR)
+        ev_key = next((u for u in data_by_utility.keys() if "ev" in u.lower()), None)
+        if isinstance(hierarchy, dict) and isinstance(hierarchy.get("meter_list"), list) and hierarchy["meter_list"]:
+            try:
+                # Query quickgraphs with aggregateGroups=false to get individual meter/spot series
+                qg_raw = await self.client.get_quickgraphs(
+                    meter_list=hierarchy["meter_list"],
+                    start_date=yesterday,
+                    end_date=today,
+                    aggregate_groups=False,
+                )
+                series_list = parse_quickgraphs_response(qg_raw)
+
+                spot_data: dict[str, dict[str, Any]] = {}
+                for s in series_list:
+                    s_name = s.get("name") or ""
+                    s_id = s.get("meter_id") or ""
+                    clean, spot = extract_spot_info(s_name)
+                    spot_label = spot or s_name
+
+                    m_details = hierarchy.get("meters", {}).get(s_id, {})
+                    parent_gid = m_details.get("parent_group")
+                    parent_gname = (
+                        hierarchy.get("groups", {}).get(parent_gid, {}).get("name", "").lower()
+                        if parent_gid
+                        else ""
+                    )
+
+                    is_ev_or_spot = bool(
+                        spot
+                        or "ev" in s_name.lower()
+                        or "spot" in s_name.lower()
+                        or "stall" in s_name.lower()
+                        or "charger" in s_name.lower()
+                        or "ev" in parent_gname
+                        or "parking" in parent_gname
+                    )
+
+                    if is_ev_or_spot and spot_label:
+                        spot_data[spot_label] = {
+                            "meter_id": s_id,
+                            "name": s_name,
+                            "spot_name": spot_label,
+                            "yesterday_total": s.get("total", 0.0),
+                            "units": s.get("units", "kWh"),
+                            "readings": s.get("data", []),
+                        }
+
+                if spot_data and ev_key and ev_key in data_by_utility:
+                    data_by_utility[ev_key].spots = spot_data
+                    if len(spot_data) == 1:
+                        data_by_utility[ev_key].spot_name = list(spot_data.keys())[0]
+                    _LOGGER.debug("Discovered %d spot(s) for %s: %s", len(spot_data), ev_key, list(spot_data.keys()))
+
+            except Exception as err:
+                _LOGGER.debug("QuickGraphs spot-level query skipped: %s", err)
 
         return data_by_utility
 

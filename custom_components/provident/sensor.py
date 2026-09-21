@@ -153,6 +153,9 @@ def _build_sensor_descriptions(
                 "historical_daily_totals": data.daily_totals_history,
                 "hourly_breakdown_past_days": data.hourly_breakdown_past_days,
                 "spot_name": data.spot_name,
+                "spots": data.spots,
+                "spot_names": list(data.spots.keys()),
+                "spot_yesterday_totals": {k: v.get("yesterday_total", 0.0) for k, v in data.spots.items()},
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -173,6 +176,9 @@ def _build_sensor_descriptions(
                 "historical_daily_totals": data.daily_totals_history,
                 "latest_hourly_reading": data.latest_reading,
                 "spot_name": data.spot_name,
+                "spots": data.spots,
+                "spot_names": list(data.spots.keys()),
+                "spot_yesterday_totals": {k: v.get("yesterday_total", 0.0) for k, v in data.spots.items()},
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -203,6 +209,9 @@ def _build_sensor_descriptions(
             value_fn=lambda data: data.month_total,
             attributes_fn=lambda data: {
                 "daily_readings": data.month_daily,
+                "spot_name": data.spot_name,
+                "spots": data.spots,
+                "spot_names": list(data.spots.keys()),
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -280,7 +289,81 @@ async def async_setup_entry(
                 )
             )
 
+        # If multiple parking spots exist, register dedicated per-spot sensors
+        for spot_name in utility_data.spots:
+            if len(utility_data.spots) > 1:
+                entities.append(
+                    ProvidentSpotSensorEntity(
+                        coordinator=coordinator,
+                        entry=entry,
+                        utility_name=utility_name,
+                        spot_name=spot_name,
+                    )
+                )
+
     async_add_entities(entities)
+
+
+class ProvidentSpotSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator], SensorEntity):
+    """Representation of an individual parking spot EV sub-meter."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(
+        self,
+        coordinator: ProvidentDataUpdateCoordinator,
+        entry: ConfigEntry,
+        utility_name: str,
+        spot_name: str,
+    ) -> None:
+        """Initialize spot sub-meter."""
+        super().__init__(coordinator)
+        self.entry = entry
+        self.utility_name = utility_name
+        self.spot_name = spot_name
+        self._attr_name = f"{spot_name} Yesterday"
+        self._attr_unique_id = f"{entry.entry_id}_{slugify(utility_name)}_{slugify(spot_name)}_yesterday"
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+
+        utility_slug = slugify(utility_name)
+        base_url = entry.data.get(CONF_BASE_URL, DEFAULT_BASE_URL)
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}_{utility_slug}_{slugify(spot_name)}")},
+            name=f"Provident {utility_name} - {spot_name}",
+            manufacturer="Provident Energy",
+            model=f"{spot_name} EV Sub-meter",
+            configuration_url=base_url,
+            via_device=(DOMAIN, entry.entry_id),
+        )
+
+    @property
+    def spot_data(self) -> dict[str, Any]:
+        """Return spot details from coordinator."""
+        if not self.coordinator.data:
+            return {}
+        u_data = self.coordinator.data.get(self.utility_name)
+        if not u_data:
+            return {}
+        return u_data.spots.get(self.spot_name, {})
+
+    @property
+    def native_value(self) -> StateType:
+        """Return yesterday's total for this spot."""
+        return self.spot_data.get("yesterday_total", 0.0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return spot attributes."""
+        sd = self.spot_data
+        return {
+            "spot_name": self.spot_name,
+            "meter_id": sd.get("meter_id"),
+            "hourly_readings": sd.get("readings", []),
+            "meter_units": sd.get("units", "kWh"),
+        }
 
 
 class ProvidentSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator], SensorEntity):

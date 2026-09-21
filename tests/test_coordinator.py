@@ -93,7 +93,8 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
 
         mock_client.is_authenticated = False
         mock_client.check_login.return_value = False
-        mock_client.login.return_value = True
+        mock_client.get_meter_hierarchy.return_value = {"groups": {}, "meters": {}, "meter_list": []}
+        mock_client.get_quickgraphs.return_value = []
         mock_client.get_utilities.return_value = [
             "Electricity",
             "EV",

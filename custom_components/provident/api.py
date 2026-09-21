@@ -178,8 +178,13 @@ class ProvidentAPIClient:
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """Perform GET request and unwrap response."""
+        headers = {}
+        if path.startswith("/api/internal/"):
+            headers["Referer"] = f"{self.base_url}/secure/QuickGraphs.aspx"
+            headers["Accept"] = "application/json, text/javascript, */*; q=0.01"
+
         try:
-            resp = await self._client.get(path, params=params)
+            resp = await self._client.get(path, params=params, headers=headers)
         except httpx.HTTPError as exc:
             raise ProvidentConnError(f"HTTP connection error: {exc}") from exc
 
@@ -272,6 +277,15 @@ class ProvidentAPIClient:
             "data": data_list,
         }
 
+    async def init_quickgraphs(self) -> bool:
+        """Initialize QuickGraphs session state."""
+        try:
+            resp = await self._client.get("/secure/QuickGraphs.aspx")
+            return resp.status_code < 400
+        except Exception as err:
+            _LOGGER.debug("QuickGraphs init error: %s", err)
+            return False
+
     async def get_meter_tree(self, depth: int = 2) -> Any:
         """Fetch meter hierarchy root nodes from REST API."""
         return await self._get(
@@ -285,6 +299,90 @@ class ProvidentAPIClient:
             "/api/internal/metertree/getchildren",
             params={"groupId": group_id},
         )
+
+    async def get_meter_hierarchy(self) -> dict[str, Any]:
+        """Discover full meter tree hierarchy including all child groups and meters."""
+        await self.init_quickgraphs()
+        tree = await self.get_meter_tree(depth=2)
+
+        groups: dict[str, Any] = {}
+        meters: dict[str, Any] = {}
+
+        def process_nodes(node_list: Any, parent_group: str | None = None) -> None:
+            if isinstance(node_list, dict):
+                node_list = [node_list]
+            if not isinstance(node_list, list):
+                return
+
+            for n in node_list:
+                if not isinstance(n, dict):
+                    continue
+                nid = str(n.get("id") or n.get("Id") or "")
+                ntext = str(n.get("text") or n.get("Text") or n.get("name") or n.get("Name") or "").strip()
+                ntype = str(n.get("type") or n.get("Type") or "").lower()
+                has_children = bool(
+                    n.get("hasChildren")
+                    or n.get("HasChildren")
+                    or "group" in ntype
+                    or (nid.isdigit() and ":" not in nid)
+                )
+
+                if has_children:
+                    clean_gid = nid.replace("GROUP:", "").replace("group:", "")
+                    if clean_gid and clean_gid.lower() != "root":
+                        groups[clean_gid] = {
+                            "id": f"GROUP:{clean_gid}",
+                            "groupId": clean_gid,
+                            "name": ntext,
+                            "children": [],
+                        }
+                elif nid and nid.lower() != "root":
+                    meters[nid] = {
+                        "id": nid,
+                        "name": ntext,
+                        "type": ntype,
+                        "parent_group": parent_group,
+                    }
+                    if parent_group and parent_group in groups:
+                        groups[parent_group]["children"].append(meters[nid])
+
+                children = n.get("children") or n.get("Children")
+                if isinstance(children, list) and children:
+                    process_nodes(children, parent_group=nid if has_children else parent_group)
+
+        process_nodes(tree)
+
+        # For every discovered group, query getchildren to discover child meters (e.g. EV parking spots)
+        for gid, grp in list(groups.items()):
+            try:
+                c_data = await self.get_meter_tree_children(gid)
+                if isinstance(c_data, list):
+                    for cn in c_data:
+                        if not isinstance(cn, dict):
+                            continue
+                        cid = str(cn.get("id") or cn.get("Id") or "")
+                        ctext = str(cn.get("text") or cn.get("Text") or cn.get("name") or cn.get("Name") or "").strip()
+                        ctype = str(cn.get("type") or cn.get("Type") or "").lower()
+                        if cid and cid.lower() != "root":
+                            m_info = {
+                                "id": cid,
+                                "name": ctext,
+                                "type": ctype,
+                                "parent_group": gid,
+                            }
+                            meters[cid] = m_info
+                            if m_info not in grp["children"]:
+                                grp["children"].append(m_info)
+            except Exception as err:
+                _LOGGER.debug("Error fetching children for group %s: %s", gid, err)
+
+        meter_list_items = list(meters.keys()) + [f"GROUP:{g}" for g in groups.keys()]
+
+        return {
+            "groups": groups,
+            "meters": meters,
+            "meter_list": meter_list_items,
+        }
 
     async def get_quickgraphs(
         self,
@@ -308,3 +406,54 @@ class ProvidentAPIClient:
                 "aggregateGroups": str(aggregate_groups).lower(),
             },
         )
+
+
+def parse_quickgraphs_response(raw_resp: Any) -> list[dict[str, Any]]:
+    """Parse quickgraphs response into standardized list of meter series."""
+    series_list = []
+    items = raw_resp
+    if isinstance(raw_resp, dict):
+        items = (
+            raw_resp.get("series")
+            or raw_resp.get("Series")
+            or raw_resp.get("data")
+            or raw_resp.get("Data")
+            or raw_resp.get("d")
+            or [raw_resp]
+        )
+    if not isinstance(items, list):
+        return []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("Name") or item.get("label") or "")
+        meter_id = str(item.get("meterId") or item.get("id") or item.get("MeterId") or "")
+        unit = str(item.get("unit") or item.get("Unit") or item.get("units") or "kWh")
+        pts = item.get("data") or item.get("Data") or item.get("points") or []
+
+        total = 0.0
+        parsed_pts: list[Any] = []
+        if isinstance(pts, list):
+            for pt in pts:
+                if isinstance(pt, (int, float)):
+                    parsed_pts.append(float(pt))
+                    total += float(pt)
+                elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    val = float(pt[1]) if pt[1] is not None else 0.0
+                    parsed_pts.append([pt[0], val])
+                    total += val
+                elif isinstance(pt, dict):
+                    val = float(pt.get("y", pt.get("value", 0.0)) or 0.0)
+                    parsed_pts.append(val)
+                    total += val
+
+        series_list.append({
+            "name": name,
+            "meter_id": meter_id,
+            "units": unit,
+            "total": round(total, 4),
+            "data": parsed_pts,
+        })
+    return series_list
+
