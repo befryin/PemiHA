@@ -277,6 +277,26 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 daily_hourly_history[yesterday_date_str] = yesterday_hourly
                 daily_totals_history[yesterday_date_str] = yesterday_total
 
+                # Ensure past 7 days are cached in daily_hourly_history (only queries missing dates)
+                missing_dates = [
+                    (today - timedelta(days=i))
+                    for i in range(1, 8)
+                    if (today - timedelta(days=i)).isoformat() not in daily_hourly_history
+                ]
+                if missing_dates:
+                    try:
+                        hist_res = await asyncio.gather(
+                            *(self.client.get_chart_data(utility, "day", d) for d in missing_dates),
+                            return_exceptions=True,
+                        )
+                        for d, res in zip(missing_dates, hist_res):
+                            d_str = d.isoformat()
+                            if isinstance(res, dict) and "data" in res and res["data"]:
+                                daily_hourly_history[d_str] = res["data"]
+                                daily_totals_history[d_str] = round(sum(res["data"]), 4)
+                    except Exception as err:
+                        _LOGGER.debug("Past days history prefetch error for %s: %s", utility, err)
+
                 hourly_breakdown_past_days = [
                     {
                         "date": d_str,
