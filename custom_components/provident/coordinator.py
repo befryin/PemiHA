@@ -74,21 +74,46 @@ def extract_spot_info(name: str) -> tuple[str, str | None]:
         return name, None
 
     patterns = [
-        r"[\(\[\-–—:]?\s*(spot\s*#?\s*[\w\d-]+)\s*[\)\]]?",
-        r"[\(\[\-–—:]?\s*(stall\s*#?\s*[\w\d-]+)\s*[\)\]]?",
-        r"[\(\[\-–—:]?\s*(parking\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:_/]?\s*(spot\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:_/]?\s*(stall\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:_/]?\s*(charger\s*#?\s*[\w\d-]+)\s*[\)\]]?",
+        r"[\(\[\-–—:_/]?\s*(parking\s*#?\s*[\w\d-]+)\s*[\)\]]?",
         r"[\(\[]\s*([pP]\d+[-_]?\d+)\s*[\)\]]",
-        r"[-–—:]\s*([pP]\d+[-_]?\d+)\s*$",
+        r"[-–—:_/]\s*([pP]\d+[-_]?\d+)\s*$",
+        r"[-–—:_/]\s*(\d+)\s*$",
     ]
 
     for pat in patterns:
         match = re.search(pat, name, re.IGNORECASE)
         if match:
             spot = match.group(1).strip()
-            clean_name = re.sub(pat, "", name, flags=re.IGNORECASE).strip(" -–—:()[]")
+            clean_name = re.sub(pat, "", name, flags=re.IGNORECASE).strip(" -–—:_/()[]")
             return clean_name or name, spot
 
     return name, None
+
+
+def clean_spot_name(name: str, utility_name: str = "EV") -> str:
+    """Clean and normalize spot name, removing redundant utility prefixes.
+
+    Prevents doubled names such as 'EV - EV Spot 1' or 'ev_spot_1_ev_spot_1'.
+    """
+    if not name:
+        return ""
+    # Strip utility prefix if present (e.g. "EV - Spot 1" -> "Spot 1", "EV Spot 1" -> "Spot 1")
+    u_pat = rf"^{re.escape(utility_name)}\s*[-–—:_/]?\s*"
+    cleaned = re.sub(u_pat, "", name.strip(), flags=re.IGNORECASE).strip(" -–—:_#()[]")
+    if not cleaned:
+        cleaned = name.strip()
+    cleaned = re.sub(r"_+", " ", cleaned).strip()
+    if re.match(r"^[pP]\d+[-_]?\d+$", cleaned):
+        cleaned = f"Spot {cleaned.upper()}"
+    elif re.match(r"^\d+$", cleaned):
+        cleaned = f"Spot {cleaned}"
+    elif re.match(r"^(spot|stall|charger|parking)\s*#?\s*(\w+)$", cleaned, re.IGNORECASE):
+        m = re.match(r"^(spot|stall|charger|parking)\s*#?\s*(\w+)$", cleaned, re.IGNORECASE)
+        cleaned = f"{m.group(1).capitalize()} {m.group(2)}"
+    return cleaned
 
 
 def extract_meters_from_tree(tree_data: Any) -> list[dict[str, str]]:
@@ -236,15 +261,6 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
             res = await self.client.get_meter_hierarchy()
             if isinstance(res, dict):
                 hierarchy = res
-            discovered_meters = hierarchy.get("meters", {})
-            if isinstance(discovered_meters, dict):
-                for m_id, m_info in discovered_meters.items():
-                    if isinstance(m_info, dict):
-                        name = m_info.get("name")
-                        if name and name not in utilities and name.lower() not in ("root", "meters", "all"):
-                            clean, spot = extract_spot_info(name)
-                            if not spot and name not in utilities:
-                                utilities.append(name)
         except Exception as err:
             _LOGGER.debug("Meter tree hierarchy discovery skipped or returned: %s", err)
 
@@ -466,7 +482,8 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     s_name = s.get("name") or ""
                     s_id = s.get("meter_id") or ""
                     clean, spot = extract_spot_info(s_name)
-                    spot_label = spot or s_name
+                    raw_spot = spot or s_name
+                    spot_label = clean_spot_name(raw_spot, ev_key or "EV")
 
                     m_details = hierarchy.get("meters", {}).get(s_id, {})
                     parent_gid = m_details.get("parent_group")
@@ -486,7 +503,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                         or "parking" in parent_gname
                     )
 
-                    if is_ev_or_spot and spot_label:
+                    if is_ev_or_spot and spot_label and spot_label.lower() != (ev_key or "ev").lower():
                         m_total = month_totals_by_id.get(s_id, month_totals_by_name.get(s_name, 0.0))
                         m_readings = month_readings_by_id.get(s_id, [])
                         spot_data[spot_label] = {

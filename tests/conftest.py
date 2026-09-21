@@ -267,10 +267,24 @@ if "homeassistant" not in sys.modules:
     class SensorEntity:
         entity_description: SensorEntityDescription
         _attr_has_entity_name: bool = False
+        _attr_name: str | None = None
         _attr_unique_id: str | None = None
+        _attr_suggested_object_id: str | None = None
         _attr_device_info: DeviceInfo | None = None
         _attr_state_class: SensorStateClass | None = None
         _attr_native_unit_of_measurement: str | None = None
+
+        @property
+        def name(self) -> str | None:
+            if hasattr(self, "_attr_name") and self._attr_name is not None:
+                return self._attr_name
+            if hasattr(self, "entity_description") and self.entity_description:
+                return self.entity_description.name
+            return None
+
+        @property
+        def suggested_object_id(self) -> str | None:
+            return getattr(self, "_attr_suggested_object_id", None)
 
         @property
         def state_class(self) -> SensorStateClass | None:

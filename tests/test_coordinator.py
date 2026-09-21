@@ -85,6 +85,19 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clean, "Electricity")
         self.assertIsNone(spot)
 
+    def test_clean_spot_name(self):
+        """Test clean_spot_name to ensure no repeating utility/spot prefixes."""
+        from custom_components.provident.coordinator import clean_spot_name
+
+        self.assertEqual(clean_spot_name("EV - Spot P2-14", "EV"), "Spot P2-14")
+        self.assertEqual(clean_spot_name("EV Spot 1", "EV"), "Spot 1")
+        self.assertEqual(clean_spot_name("EV_Spot_1", "EV"), "Spot 1")
+        self.assertEqual(clean_spot_name("EV Charger 1", "EV"), "Charger 1")
+        self.assertEqual(clean_spot_name("EV (P2-10)", "EV"), "Spot P2-10")
+        self.assertEqual(clean_spot_name("P2-14", "EV"), "Spot P2-14")
+        self.assertEqual(clean_spot_name("Spot P2-14", "EV"), "Spot P2-14")
+        self.assertEqual(clean_spot_name("1", "EV"), "Spot 1")
+
     @patch("custom_components.provident.coordinator.ProvidentAPIClient")
     async def test_coordinator_data_fetch_success(self, mock_client_cls):
         """Test successful data update coordinator refresh."""

@@ -38,7 +38,11 @@ from .const import (
     SENSOR_TYPE_YESTERDAY,
     UTILITY_ICONS,
 )
-from .coordinator import ProvidentDataUpdateCoordinator, ProvidentUtilityData
+from .coordinator import (
+    ProvidentDataUpdateCoordinator,
+    ProvidentUtilityData,
+    clean_spot_name,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -340,21 +344,28 @@ class ProvidentSpotSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator
         self.spot_name = spot_name
         self.sensor_type = sensor_type
 
-        suffix = "This Month" if sensor_type == "month" else "Yesterday"
-        self._attr_name = f"{spot_name} {suffix}"
-        self._attr_unique_id = f"{entry.entry_id}_{slugify(utility_name)}_{slugify(spot_name)}_{sensor_type}"
+        clean_spot = clean_spot_name(spot_name, utility_name)
+        spot_slug = slugify(clean_spot)
+        utility_slug = slugify(utility_name)
+
+        # In Home Assistant with _attr_has_entity_name = True,
+        # HA names the entity as "{device_name} {entity_name}"
+        # Setting _attr_name to just "Yesterday" or "This Month" prevents
+        # repeated naming like "Provident EV - Spot 1 Spot 1 Yesterday"
+        self._attr_name = "This Month" if sensor_type == "month" else "Yesterday"
+        self._attr_unique_id = f"{entry.entry_id}_{utility_slug}_{spot_slug}_{sensor_type}"
+        self._attr_suggested_object_id = f"provident_{utility_slug}_{spot_slug}_{sensor_type}"
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = (
             SensorStateClass.TOTAL_INCREASING if sensor_type == "month" else SensorStateClass.TOTAL
         )
 
-        utility_slug = slugify(utility_name)
         base_url = entry.data.get(CONF_BASE_URL, DEFAULT_BASE_URL)
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry.entry_id}_{utility_slug}_{slugify(spot_name)}")},
-            name=f"Provident {utility_name} - {spot_name}",
+            identifiers={(DOMAIN, f"{entry.entry_id}_{utility_slug}_{spot_slug}")},
+            name=f"Provident {utility_name} - {clean_spot}",
             manufacturer="Provident Energy",
-            model=f"{spot_name} EV Sub-meter",
+            model=f"{clean_spot} EV Sub-meter",
             configuration_url=base_url,
             via_device=(DOMAIN, entry.entry_id),
         )

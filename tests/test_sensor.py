@@ -214,12 +214,20 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         y_sensor = next(e for e in spot_sensors if e.spot_name == "Spot P2-14" and e.sensor_type == "yesterday")
         self.assertEqual(y_sensor.native_value, 4.5)
         self.assertEqual(y_sensor.extra_state_attributes["yesterday_total"], 4.5)
+        self.assertEqual(y_sensor.name, "Yesterday")
+        self.assertEqual(y_sensor.device_info.name, "Provident EV - Spot P2-14")
+        self.assertEqual(y_sensor.suggested_object_id, "provident_ev_spot_p2_14_yesterday")
+        self.assertEqual(y_sensor.unique_id, "test_entry_id_ev_spot_p2_14_yesterday")
 
         # Verify Month sensor
         m_sensor = next(e for e in spot_sensors if e.spot_name == "Spot P2-14" and e.sensor_type == "month")
         self.assertEqual(m_sensor.native_value, 55.2)
         self.assertEqual(m_sensor.extra_state_attributes["month_total"], 55.2)
         self.assertEqual(m_sensor.state_class, SensorStateClass.TOTAL_INCREASING)
+        self.assertEqual(m_sensor.name, "This Month")
+        self.assertEqual(m_sensor.device_info.name, "Provident EV - Spot P2-14")
+        self.assertEqual(m_sensor.suggested_object_id, "provident_ev_spot_p2_14_month")
+        self.assertEqual(m_sensor.unique_id, "test_entry_id_ev_spot_p2_14_month")
 
 
 if __name__ == "__main__":
