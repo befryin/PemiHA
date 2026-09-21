@@ -177,6 +177,50 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         # 7 sensors per utility x 2 utilities = 14 sensors
         self.assertEqual(len(added_entities), 14)
 
+    async def test_spot_sensors_created_for_multiple_spots(self):
+        """Test individual per-spot sensors for yesterday and this month."""
+        ev_data = ProvidentUtilityData("EV", "kWh", portal_total=116.0)
+        ev_data.spots = {
+            "Spot P2-14": {
+                "meter_id": "MP:123",
+                "yesterday_total": 4.5,
+                "month_total": 55.2,
+                "readings": [0.5, 1.0],
+                "month_readings": [10.0, 15.0],
+            },
+            "Spot P2-15": {
+                "meter_id": "MP:124",
+                "yesterday_total": 2.0,
+                "month_total": 28.1,
+                "readings": [0.2, 0.5],
+                "month_readings": [5.0, 8.0],
+            },
+        }
+        self.coordinator.data = {"EV": ev_data}
+        self.hass.data = {DOMAIN: {self.entry.entry_id: self.coordinator}}
+
+        added_entities = []
+        def add_entities(ents):
+            added_entities.extend(ents)
+
+        await async_setup_entry(self.hass, self.entry, add_entities)
+        # 7 regular EV sensors + (2 spots * 2 sensors: yesterday + month) = 11 sensors
+        self.assertEqual(len(added_entities), 11)
+
+        spot_sensors = [e for e in added_entities if getattr(e, "spot_name", None)]
+        self.assertEqual(len(spot_sensors), 4)
+
+        # Verify Yesterday sensor
+        y_sensor = next(e for e in spot_sensors if e.spot_name == "Spot P2-14" and e.sensor_type == "yesterday")
+        self.assertEqual(y_sensor.native_value, 4.5)
+        self.assertEqual(y_sensor.extra_state_attributes["yesterday_total"], 4.5)
+
+        # Verify Month sensor
+        m_sensor = next(e for e in spot_sensors if e.spot_name == "Spot P2-14" and e.sensor_type == "month")
+        self.assertEqual(m_sensor.native_value, 55.2)
+        self.assertEqual(m_sensor.extra_state_attributes["month_total"], 55.2)
+        self.assertEqual(m_sensor.state_class, SensorStateClass.TOTAL_INCREASING)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -429,7 +429,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
         ev_key = next((u for u in data_by_utility.keys() if "ev" in u.lower()), None)
         if isinstance(hierarchy, dict) and isinstance(hierarchy.get("meter_list"), list) and hierarchy["meter_list"]:
             try:
-                # Query quickgraphs with aggregateGroups=false to get individual meter/spot series
+                # Query quickgraphs with aggregateGroups=false to get individual meter/spot series for yesterday
                 qg_raw = await self.client.get_quickgraphs(
                     meter_list=hierarchy["meter_list"],
                     start_date=yesterday,
@@ -437,6 +437,29 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     aggregate_groups=False,
                 )
                 series_list = parse_quickgraphs_response(qg_raw)
+
+                # Also query quickgraphs for month-to-date breakdown
+                month_totals_by_id: dict[str, float] = {}
+                month_readings_by_id: dict[str, list[Any]] = {}
+                month_totals_by_name: dict[str, float] = {}
+                try:
+                    qg_month_raw = await self.client.get_quickgraphs(
+                        meter_list=hierarchy["meter_list"],
+                        start_date=first_of_month,
+                        end_date=today,
+                        aggregate_groups=False,
+                    )
+                    series_month_list = parse_quickgraphs_response(qg_month_raw)
+                    for sm in series_month_list:
+                        sm_id = sm.get("meter_id")
+                        sm_name = sm.get("name")
+                        if sm_id:
+                            month_totals_by_id[sm_id] = sm.get("total", 0.0)
+                            month_readings_by_id[sm_id] = sm.get("data", [])
+                        if sm_name:
+                            month_totals_by_name[sm_name] = sm.get("total", 0.0)
+                except Exception as err_m:
+                    _LOGGER.debug("Failed fetching month spot breakdown from quickgraphs: %s", err_m)
 
                 spot_data: dict[str, dict[str, Any]] = {}
                 for s in series_list:
@@ -464,13 +487,17 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     )
 
                     if is_ev_or_spot and spot_label:
+                        m_total = month_totals_by_id.get(s_id, month_totals_by_name.get(s_name, 0.0))
+                        m_readings = month_readings_by_id.get(s_id, [])
                         spot_data[spot_label] = {
                             "meter_id": s_id,
                             "name": s_name,
                             "spot_name": spot_label,
                             "yesterday_total": s.get("total", 0.0),
+                            "month_total": m_total,
                             "units": s.get("units", "kWh"),
                             "readings": s.get("data", []),
+                            "month_readings": m_readings,
                         }
 
                 if spot_data and ev_key and ev_key in data_by_utility:

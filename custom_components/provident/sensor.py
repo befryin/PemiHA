@@ -156,6 +156,7 @@ def _build_sensor_descriptions(
                 "spots": data.spots,
                 "spot_names": list(data.spots.keys()),
                 "spot_yesterday_totals": {k: v.get("yesterday_total", 0.0) for k, v in data.spots.items()},
+                "spot_month_totals": {k: v.get("month_total", 0.0) for k, v in data.spots.items()},
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -179,6 +180,7 @@ def _build_sensor_descriptions(
                 "spots": data.spots,
                 "spot_names": list(data.spots.keys()),
                 "spot_yesterday_totals": {k: v.get("yesterday_total", 0.0) for k, v in data.spots.items()},
+                "spot_month_totals": {k: v.get("month_total", 0.0) for k, v in data.spots.items()},
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -212,6 +214,8 @@ def _build_sensor_descriptions(
                 "spot_name": data.spot_name,
                 "spots": data.spots,
                 "spot_names": list(data.spots.keys()),
+                "spot_yesterday_totals": {k: v.get("yesterday_total", 0.0) for k, v in data.spots.items()},
+                "spot_month_totals": {k: v.get("month_total", 0.0) for k, v in data.spots.items()},
                 "meter_units": data.units,
                 "last_updated": data.last_updated.isoformat() if data.last_updated else None,
             },
@@ -289,7 +293,7 @@ async def async_setup_entry(
                 )
             )
 
-        # If multiple parking spots exist, register dedicated per-spot sensors
+        # If multiple parking spots exist, register dedicated per-spot sensors (yesterday and month)
         for spot_name in utility_data.spots:
             if len(utility_data.spots) > 1:
                 entities.append(
@@ -298,6 +302,16 @@ async def async_setup_entry(
                         entry=entry,
                         utility_name=utility_name,
                         spot_name=spot_name,
+                        sensor_type="yesterday",
+                    )
+                )
+                entities.append(
+                    ProvidentSpotSensorEntity(
+                        coordinator=coordinator,
+                        entry=entry,
+                        utility_name=utility_name,
+                        spot_name=spot_name,
+                        sensor_type="month",
                     )
                 )
 
@@ -309,7 +323,6 @@ class ProvidentSpotSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:ev-station"
 
     def __init__(
@@ -318,15 +331,22 @@ class ProvidentSpotSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator
         entry: ConfigEntry,
         utility_name: str,
         spot_name: str,
+        sensor_type: str = "yesterday",
     ) -> None:
         """Initialize spot sub-meter."""
         super().__init__(coordinator)
         self.entry = entry
         self.utility_name = utility_name
         self.spot_name = spot_name
-        self._attr_name = f"{spot_name} Yesterday"
-        self._attr_unique_id = f"{entry.entry_id}_{slugify(utility_name)}_{slugify(spot_name)}_yesterday"
+        self.sensor_type = sensor_type
+
+        suffix = "This Month" if sensor_type == "month" else "Yesterday"
+        self._attr_name = f"{spot_name} {suffix}"
+        self._attr_unique_id = f"{entry.entry_id}_{slugify(utility_name)}_{slugify(spot_name)}_{sensor_type}"
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = (
+            SensorStateClass.TOTAL_INCREASING if sensor_type == "month" else SensorStateClass.TOTAL
+        )
 
         utility_slug = slugify(utility_name)
         base_url = entry.data.get(CONF_BASE_URL, DEFAULT_BASE_URL)
@@ -351,19 +371,27 @@ class ProvidentSpotSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator
 
     @property
     def native_value(self) -> StateType:
-        """Return yesterday's total for this spot."""
+        """Return total for this spot (yesterday or month-to-date)."""
+        if self.sensor_type == "month":
+            return self.spot_data.get("month_total", 0.0)
         return self.spot_data.get("yesterday_total", 0.0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return spot attributes."""
         sd = self.spot_data
-        return {
+        attrs: dict[str, Any] = {
             "spot_name": self.spot_name,
             "meter_id": sd.get("meter_id"),
-            "hourly_readings": sd.get("readings", []),
             "meter_units": sd.get("units", "kWh"),
         }
+        if self.sensor_type == "month":
+            attrs["daily_readings"] = sd.get("month_readings", [])
+            attrs["month_total"] = sd.get("month_total", 0.0)
+        else:
+            attrs["hourly_readings"] = sd.get("readings", [])
+            attrs["yesterday_total"] = sd.get("yesterday_total", 0.0)
+        return attrs
 
 
 class ProvidentSensorEntity(CoordinatorEntity[ProvidentDataUpdateCoordinator], SensorEntity):
