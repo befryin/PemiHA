@@ -445,7 +445,11 @@ def parse_quickgraphs_response(raw_resp: Any) -> list[dict[str, Any]]:
                     total += val
                 elif isinstance(pt, dict):
                     val = float(pt.get("y", pt.get("value", 0.0)) or 0.0)
-                    parsed_pts.append(val)
+                    ts = pt.get("x", pt.get("date", pt.get("Date", pt.get("time", pt.get("Time", pt.get("timestamp"))))))
+                    if ts is not None:
+                        parsed_pts.append([ts, val])
+                    else:
+                        parsed_pts.append(val)
                     total += val
 
         series_list.append({

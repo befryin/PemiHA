@@ -116,6 +116,185 @@ def clean_spot_name(name: str, utility_name: str = "EV") -> str:
     return cleaned
 
 
+def parse_timestamp_to_datetime(ts: Any) -> datetime | None:
+    """Parse numeric epoch or ISO/ASP.NET string timestamp into local datetime."""
+    if ts is None:
+        return None
+
+    # 1. Numeric epoch timestamp
+    if isinstance(ts, (int, float)):
+        try:
+            sec = ts / 1000.0 if ts > 1e11 else (ts if ts > 1e8 else None)
+            if sec is not None:
+                if hasattr(dt_util, "as_local") and hasattr(dt_util, "utc_from_timestamp"):
+                    return dt_util.as_local(dt_util.utc_from_timestamp(sec))
+                return datetime.fromtimestamp(sec)
+        except Exception:
+            return None
+
+    # 2. String timestamp
+    if isinstance(ts, str):
+        ts_clean = ts.strip()
+        date_match = re.search(r"/Date\((\d+)\)/", ts_clean)
+        if date_match:
+            try:
+                sec = int(date_match.group(1)) / 1000.0
+                if hasattr(dt_util, "as_local") and hasattr(dt_util, "utc_from_timestamp"):
+                    return dt_util.as_local(dt_util.utc_from_timestamp(sec))
+                return datetime.fromtimestamp(sec)
+            except Exception:
+                return None
+        if hasattr(dt_util, "parse_datetime"):
+            parsed = dt_util.parse_datetime(ts_clean)
+            if parsed:
+                return dt_util.as_local(parsed) if hasattr(dt_util, "as_local") else parsed
+        try:
+            return datetime.fromisoformat(ts_clean)
+        except Exception:
+            pass
+
+    return None
+
+
+def parse_interval_points_to_daily_hourly(
+    points: list[Any],
+    target_dates: list[date] | None = None,
+) -> dict[str, list[float]]:
+    """Convert timestamped interval points into 24-hour hourly arrays mapped by YYYY-MM-DD."""
+    daily_buckets: dict[str, list[float]] = {}
+    target_date_strs = {d.isoformat() for d in target_dates} if target_dates else None
+    has_timestamps = False
+
+    for pt in points:
+        ts = None
+        val = 0.0
+
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            ts = pt[0]
+            try:
+                val = float(pt[1]) if pt[1] is not None else 0.0
+            except (ValueError, TypeError):
+                val = 0.0
+        elif isinstance(pt, dict):
+            val_raw = pt.get("y", pt.get("value", pt.get("val", pt.get("reading", 0.0))))
+            try:
+                val = float(val_raw) if val_raw is not None else 0.0
+            except (ValueError, TypeError):
+                val = 0.0
+            ts = pt.get("x", pt.get("date", pt.get("Date", pt.get("time", pt.get("Time", pt.get("timestamp"))))))
+
+        if ts is not None:
+            dt = parse_timestamp_to_datetime(ts)
+            if dt is not None:
+                has_timestamps = True
+                d_str = dt.date().isoformat()
+                if target_date_strs is None or d_str in target_date_strs:
+                    if d_str not in daily_buckets:
+                        daily_buckets[d_str] = [0.0] * 24
+                    hr = dt.hour
+                    if 0 <= hr < 24:
+                        daily_buckets[d_str][hr] = round(daily_buckets[d_str][hr] + val, 4)
+
+    # Fallback if points were non-timestamped flat list of 24 hourly floats for a single date
+    if not has_timestamps and points:
+        num_list = []
+        for pt in points:
+            if isinstance(pt, (int, float)):
+                num_list.append(float(pt))
+            elif isinstance(pt, (list, tuple)) and len(pt) >= 1 and isinstance(pt[0], (int, float)):
+                num_list.append(float(pt[0]))
+        if len(num_list) == 24 and target_dates and len(target_dates) == 1:
+            d_str = target_dates[0].isoformat()
+            daily_buckets[d_str] = [round(v, 4) for v in num_list]
+
+    return daily_buckets
+
+
+def match_series_to_utility(
+    series_name: str,
+    meter_id: str,
+    utilities: list[str] | dict[str, Any],
+    hierarchy: dict[str, Any] | None = None,
+) -> str | None:
+    """Match a meter series from QuickGraphs to a known utility name."""
+    s_clean = (series_name or "").strip()
+    s_lower = s_clean.lower()
+    m_id = (meter_id or "").strip()
+
+    util_list = list(utilities.keys()) if isinstance(utilities, dict) else list(utilities)
+
+    # 1. Exact case-insensitive match on series name
+    for u in util_list:
+        if s_lower == u.strip().lower():
+            return u
+
+    # 2. Check meter hierarchy info
+    m_info = {}
+    if hierarchy and isinstance(hierarchy.get("meters"), dict):
+        m_info = hierarchy["meters"].get(m_id, {})
+    m_name = (m_info.get("name") or "").strip().lower()
+    parent_gid = m_info.get("parent_group")
+    parent_gname = ""
+    if hierarchy and isinstance(hierarchy.get("groups"), dict) and parent_gid:
+        parent_gname = (hierarchy["groups"].get(parent_gid, {}).get("name") or "").strip().lower()
+
+    for u in util_list:
+        u_clean = u.strip().lower()
+        if m_name and m_name == u_clean:
+            return u
+        if parent_gname and parent_gname == u_clean:
+            return u
+
+    # 3. Keyword / semantic matching
+    combined = f"{s_lower} {m_name} {parent_gname}"
+
+    # Hot Water vs Cold Water vs Water
+    if "hot water" in combined or "dhw" in combined or ("water" in combined and "hot" in combined):
+        hw = next((u for u in util_list if "hot" in u.lower() and "water" in u.lower()), None)
+        if hw:
+            return hw
+    if "cold water" in combined or ("water" in combined and "cold" in combined):
+        cw = next((u for u in util_list if "cold" in u.lower() and "water" in u.lower()), None)
+        if cw:
+            return cw
+    if "water" in combined:
+        w = next((u for u in util_list if "water" in u.lower()), None)
+        if w:
+            return w
+
+    # Heating
+    if "heating" in combined or "heat" in combined:
+        ht = next((u for u in util_list if "heat" in u.lower()), None)
+        if ht:
+            return ht
+
+    # Cooling / AC
+    if any(k in combined for k in ("cooling", "cool", "chilled", "a/c", "ac")):
+        cl = next((u for u in util_list if "cool" in u.lower() or "ac" in u.lower()), None)
+        if cl:
+            return cl
+
+    # EV
+    if any(k in combined for k in ("ev", "spot", "stall", "charger", "parking")):
+        ev = next((u for u in util_list if "ev" in u.lower() or "charg" in u.lower()), None)
+        if ev:
+            return ev
+
+    # Electricity
+    if "electric" in combined or "power" in combined:
+        el = next((u for u in util_list if "electr" in u.lower()), None)
+        if el:
+            return el
+
+    # 4. Partial substring in utility name
+    for u in util_list:
+        u_clean = u.strip().lower()
+        if u_clean in combined or any(word in combined for word in u_clean.split() if len(word) > 2):
+            return u
+
+    return None
+
+
 def extract_meters_from_tree(tree_data: Any) -> list[dict[str, str]]:
     """Recursively extract all meter and group descriptors from meter tree."""
     meters: list[dict[str, str]] = []
@@ -274,6 +453,128 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
         first_of_month = date(today.year, today.month, 1)
         first_of_year = date(today.year, 1, 1)
 
+        # Determine whether initial 7-day fetch is needed (startup/missing history) or 1-day daily refresh
+        past_7_dates = [(today - timedelta(days=i)) for i in range(1, 8)]
+        past_7_date_strs = {d.isoformat() for d in past_7_dates}
+
+        is_initial_load = False
+        if not self.data:
+            is_initial_load = True
+        else:
+            for u in utilities:
+                if u not in self.data:
+                    is_initial_load = True
+                    break
+                u_history = self.data[u].daily_hourly_history
+                if any(d_str not in u_history for d_str in past_7_date_strs):
+                    is_initial_load = True
+                    break
+
+        if is_initial_load:
+            qg_start_date = today - timedelta(days=7)
+            _LOGGER.debug("Initial data load or missing days detected: querying 7 days from QuickGraphs")
+        else:
+            qg_start_date = yesterday
+            _LOGGER.debug("Daily refresh: querying 1 day (yesterday) from QuickGraphs")
+        qg_end_date = today
+
+        # Fetch multi-meter interval readings via QuickGraphs (covers Heating, Cooling, Hot Water, EV spots, Electricity)
+        qg_hourly_by_utility: dict[str, dict[str, list[float]]] = {}
+        spot_data: dict[str, dict[str, Any]] = {}
+        ev_key = next((u for u in utilities if "ev" in u.lower()), "EV")
+
+        if isinstance(hierarchy, dict) and isinstance(hierarchy.get("meter_list"), list) and hierarchy["meter_list"]:
+            try:
+                # Query quickgraphs with aggregateGroups=false to get individual sub-meter/spot series
+                qg_raw = await self.client.get_quickgraphs(
+                    meter_list=hierarchy["meter_list"],
+                    start_date=qg_start_date,
+                    end_date=qg_end_date,
+                    aggregate_groups=False,
+                )
+                series_list = parse_quickgraphs_response(qg_raw)
+
+                # Also query quickgraphs for month-to-date breakdown for parking spots
+                month_totals_by_id: dict[str, float] = {}
+                month_readings_by_id: dict[str, list[Any]] = {}
+                month_totals_by_name: dict[str, float] = {}
+                try:
+                    qg_month_raw = await self.client.get_quickgraphs(
+                        meter_list=hierarchy["meter_list"],
+                        start_date=first_of_month,
+                        end_date=today,
+                        aggregate_groups=False,
+                    )
+                    series_month_list = parse_quickgraphs_response(qg_month_raw)
+                    for sm in series_month_list:
+                        sm_id = sm.get("meter_id")
+                        sm_name = sm.get("name")
+                        if sm_id:
+                            month_totals_by_id[sm_id] = sm.get("total", 0.0)
+                            month_readings_by_id[sm_id] = sm.get("data", [])
+                        if sm_name:
+                            month_totals_by_name[sm_name] = sm.get("total", 0.0)
+                except Exception as err_m:
+                    _LOGGER.debug("Failed fetching month spot breakdown from quickgraphs: %s", err_m)
+
+                for s in series_list:
+                    s_name = s.get("name") or ""
+                    s_id = s.get("meter_id") or ""
+                    s_pts = s.get("data") or []
+
+                    # 1. Spot identification for EV charging stalls
+                    clean, spot = extract_spot_info(s_name)
+                    raw_spot = spot or s_name
+                    spot_label = clean_spot_name(raw_spot, ev_key or "EV")
+
+                    m_details = hierarchy.get("meters", {}).get(s_id, {})
+                    parent_gid = m_details.get("parent_group")
+                    parent_gname = (
+                        hierarchy.get("groups", {}).get(parent_gid, {}).get("name", "").lower()
+                        if parent_gid
+                        else ""
+                    )
+
+                    is_ev_or_spot = bool(
+                        spot
+                        or "ev" in s_name.lower()
+                        or "spot" in s_name.lower()
+                        or "stall" in s_name.lower()
+                        or "charger" in s_name.lower()
+                        or "ev" in parent_gname
+                        or "parking" in parent_gname
+                    )
+
+                    if is_ev_or_spot and spot_label and spot_label.lower() != (ev_key or "ev").lower():
+                        m_total = month_totals_by_id.get(s_id, month_totals_by_name.get(s_name, 0.0))
+                        m_readings = month_readings_by_id.get(s_id, [])
+                        spot_data[spot_label] = {
+                            "meter_id": s_id,
+                            "name": s_name,
+                            "spot_name": spot_label,
+                            "yesterday_total": s.get("total", 0.0),
+                            "month_total": m_total,
+                            "units": s.get("units", "kWh"),
+                            "readings": s_pts,
+                            "month_readings": m_readings,
+                        }
+
+                    # 2. Match series to utility for hourly data
+                    matched_u = match_series_to_utility(s_name, s_id, utilities, hierarchy)
+                    if matched_u:
+                        if matched_u not in qg_hourly_by_utility:
+                            qg_hourly_by_utility[matched_u] = {}
+                        daily_map = parse_interval_points_to_daily_hourly(s_pts)
+                        for d_str, h_vals in daily_map.items():
+                            if d_str not in qg_hourly_by_utility[matched_u]:
+                                qg_hourly_by_utility[matched_u][d_str] = [0.0] * 24
+                            for hr in range(24):
+                                qg_hourly_by_utility[matched_u][d_str][hr] = round(
+                                    qg_hourly_by_utility[matched_u][d_str][hr] + h_vals[hr], 4
+                                )
+            except Exception as err:
+                _LOGGER.debug("QuickGraphs interval query error: %s", err)
+
         data_by_utility: dict[str, ProvidentUtilityData] = {}
 
         for utility in utilities:
@@ -288,25 +589,40 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 yesterday_hourly = yesterday_res["data"]
                 yesterday_total = round(sum(yesterday_hourly), 4)
 
-                # If yesterday hourly sum is 0 but 30-day card has daily points, fallback to latest non-zero daily reading
-                if yesterday_total == 0.0 and last_30_days_daily:
-                    non_zero_days = [v for v in last_30_days_daily if v > 0]
-                    if non_zero_days:
-                        yesterday_total = round(non_zero_days[-1], 4)
-
-                # Preserve any previously fetched on-demand history for this utility
+                # Preserve any previously cached history for this utility
                 daily_hourly_history: dict[str, list[float]] = {}
                 daily_totals_history: dict[str, float] = {}
                 if self.data and utility in self.data:
                     daily_hourly_history = dict(self.data[utility].daily_hourly_history)
                     daily_totals_history = dict(self.data[utility].daily_totals_history)
 
-                # Always maintain yesterday in historical breakdown
-                yesterday_date_str = yesterday.isoformat()
-                daily_hourly_history[yesterday_date_str] = yesterday_hourly
-                daily_totals_history[yesterday_date_str] = yesterday_total
+                # Merge QuickGraphs interval data for this utility
+                if utility in qg_hourly_by_utility:
+                    for d_str, h_vals in qg_hourly_by_utility[utility].items():
+                        if d_str not in daily_hourly_history or not any(daily_hourly_history[d_str]):
+                            daily_hourly_history[d_str] = h_vals
+                            daily_totals_history[d_str] = round(sum(h_vals), 4)
+                        elif any(h_vals) and sum(h_vals) > sum(daily_hourly_history[d_str]):
+                            daily_hourly_history[d_str] = h_vals
+                            daily_totals_history[d_str] = round(sum(h_vals), 4)
 
-                # Ensure past 7 days are cached in daily_hourly_history (only queries missing dates)
+                # If yesterday from GetChartData was empty/zero, use QuickGraphs yesterday data
+                yesterday_date_str = yesterday.isoformat()
+                if yesterday_date_str in daily_hourly_history and any(daily_hourly_history[yesterday_date_str]):
+                    if not any(yesterday_hourly) or sum(daily_hourly_history[yesterday_date_str]) > sum(yesterday_hourly):
+                        yesterday_hourly = daily_hourly_history[yesterday_date_str]
+                        yesterday_total = daily_totals_history[yesterday_date_str]
+                else:
+                    daily_hourly_history[yesterday_date_str] = yesterday_hourly
+                    daily_totals_history[yesterday_date_str] = yesterday_total
+
+                # If yesterday hourly sum is 0 but 30-day card has daily points, fallback to latest non-zero daily reading
+                if yesterday_total == 0.0 and last_30_days_daily:
+                    non_zero_days = [v for v in last_30_days_daily if v > 0]
+                    if non_zero_days:
+                        yesterday_total = round(non_zero_days[-1], 4)
+
+                # Ensure past 7 days are in daily_hourly_history (only queries missing dates via GetChartData)
                 missing_dates = [
                     (today - timedelta(days=i))
                     for i in range(1, 8)
@@ -325,6 +641,11 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                                 daily_totals_history[d_str] = round(sum(res["data"]), 4)
                     except Exception as err:
                         _LOGGER.debug("Past days history prefetch error for %s: %s", utility, err)
+
+                # Keep rolling 7-day window (prune dates older than 8 days)
+                allowed_dates = {(today - timedelta(days=i)).isoformat() for i in range(0, 9)}
+                daily_hourly_history = {d: h for d, h in daily_hourly_history.items() if d in allowed_dates}
+                daily_totals_history = {d: t for d, t in daily_totals_history.items() if d in allowed_dates}
 
                 hourly_breakdown_past_days = [
                     {
@@ -389,8 +710,15 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
                 units = normalize_unit(raw_units, utility)
 
-                # Extract parking spot identifier if present in meter name
+                # Extract parking spot identifier if present in utility name
                 clean_name, spot_name = extract_spot_info(utility)
+
+                # Attach EV parking spots if this utility is EV
+                util_spots = {}
+                if spot_data and "ev" in utility.lower():
+                    util_spots = spot_data
+                    if len(spot_data) == 1 and not spot_name:
+                        spot_name = list(spot_data.keys())[0]
 
                 # Portal total: the prominent number from the portal card (e.g. 402 kWh)
                 portal_total = last_30_days_total if last_30_days_total > 0 else (month_total or year_total or yesterday_total)
@@ -399,6 +727,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     name=utility,
                     units=units,
                     spot_name=spot_name,
+                    spots=util_spots,
                     portal_total=portal_total,
                     yesterday_total=yesterday_total,
                     yesterday_hourly=yesterday_hourly,
@@ -419,7 +748,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                 )
 
                 _LOGGER.debug(
-                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s",
+                    "Fetched %s: PortalCard=%.3f %s, Yesterday=%.3f %s, Month=%.3f %s, Year=%.3f %s, HistoryDays=%d",
                     utility,
                     portal_total,
                     units,
@@ -429,6 +758,7 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     units,
                     year_total,
                     units,
+                    len(daily_hourly_history),
                 )
 
             except ProvidentAuthError as err:
@@ -441,90 +771,6 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
                     raise UpdateFailed(f"Failed to fetch meter data for {utility}: {err}") from err
             except Exception as err:
                 _LOGGER.error("Unexpected error fetching meter data for %s: %s", utility, err)
-        # 6. Fetch spot-level breakdown via QuickGraphs (as observed in HAR)
-        ev_key = next((u for u in data_by_utility.keys() if "ev" in u.lower()), None)
-        if isinstance(hierarchy, dict) and isinstance(hierarchy.get("meter_list"), list) and hierarchy["meter_list"]:
-            try:
-                # Query quickgraphs with aggregateGroups=false to get individual meter/spot series for yesterday
-                qg_raw = await self.client.get_quickgraphs(
-                    meter_list=hierarchy["meter_list"],
-                    start_date=yesterday,
-                    end_date=today,
-                    aggregate_groups=False,
-                )
-                series_list = parse_quickgraphs_response(qg_raw)
-
-                # Also query quickgraphs for month-to-date breakdown
-                month_totals_by_id: dict[str, float] = {}
-                month_readings_by_id: dict[str, list[Any]] = {}
-                month_totals_by_name: dict[str, float] = {}
-                try:
-                    qg_month_raw = await self.client.get_quickgraphs(
-                        meter_list=hierarchy["meter_list"],
-                        start_date=first_of_month,
-                        end_date=today,
-                        aggregate_groups=False,
-                    )
-                    series_month_list = parse_quickgraphs_response(qg_month_raw)
-                    for sm in series_month_list:
-                        sm_id = sm.get("meter_id")
-                        sm_name = sm.get("name")
-                        if sm_id:
-                            month_totals_by_id[sm_id] = sm.get("total", 0.0)
-                            month_readings_by_id[sm_id] = sm.get("data", [])
-                        if sm_name:
-                            month_totals_by_name[sm_name] = sm.get("total", 0.0)
-                except Exception as err_m:
-                    _LOGGER.debug("Failed fetching month spot breakdown from quickgraphs: %s", err_m)
-
-                spot_data: dict[str, dict[str, Any]] = {}
-                for s in series_list:
-                    s_name = s.get("name") or ""
-                    s_id = s.get("meter_id") or ""
-                    clean, spot = extract_spot_info(s_name)
-                    raw_spot = spot or s_name
-                    spot_label = clean_spot_name(raw_spot, ev_key or "EV")
-
-                    m_details = hierarchy.get("meters", {}).get(s_id, {})
-                    parent_gid = m_details.get("parent_group")
-                    parent_gname = (
-                        hierarchy.get("groups", {}).get(parent_gid, {}).get("name", "").lower()
-                        if parent_gid
-                        else ""
-                    )
-
-                    is_ev_or_spot = bool(
-                        spot
-                        or "ev" in s_name.lower()
-                        or "spot" in s_name.lower()
-                        or "stall" in s_name.lower()
-                        or "charger" in s_name.lower()
-                        or "ev" in parent_gname
-                        or "parking" in parent_gname
-                    )
-
-                    if is_ev_or_spot and spot_label and spot_label.lower() != (ev_key or "ev").lower():
-                        m_total = month_totals_by_id.get(s_id, month_totals_by_name.get(s_name, 0.0))
-                        m_readings = month_readings_by_id.get(s_id, [])
-                        spot_data[spot_label] = {
-                            "meter_id": s_id,
-                            "name": s_name,
-                            "spot_name": spot_label,
-                            "yesterday_total": s.get("total", 0.0),
-                            "month_total": m_total,
-                            "units": s.get("units", "kWh"),
-                            "readings": s.get("data", []),
-                            "month_readings": m_readings,
-                        }
-
-                if spot_data and ev_key and ev_key in data_by_utility:
-                    data_by_utility[ev_key].spots = spot_data
-                    if len(spot_data) == 1:
-                        data_by_utility[ev_key].spot_name = list(spot_data.keys())[0]
-                    _LOGGER.debug("Discovered %d spot(s) for %s: %s", len(spot_data), ev_key, list(spot_data.keys()))
-
-            except Exception as err:
-                _LOGGER.debug("QuickGraphs spot-level query skipped: %s", err)
 
         return data_by_utility
 
@@ -563,6 +809,36 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
             num_days = max(1, min(int(days), 90))
             dates = [end_date - timedelta(days=i) for i in range(num_days)]
 
+        # Pre-fetch QuickGraphs for requested date range to support sub-meters (Heating, Cooling, Hot Water)
+        qg_hourly_by_u: dict[str, dict[str, list[float]]] = {}
+        try:
+            hierarchy = await self.client.get_meter_hierarchy()
+            if isinstance(hierarchy, dict) and hierarchy.get("meter_list") and dates:
+                qg_raw = await self.client.get_quickgraphs(
+                    meter_list=hierarchy["meter_list"],
+                    start_date=min(dates),
+                    end_date=max(dates) + timedelta(days=1),
+                    aggregate_groups=False,
+                )
+                qg_series = parse_quickgraphs_response(qg_raw)
+                for s in qg_series:
+                    s_name = s.get("name") or ""
+                    s_id = s.get("meter_id") or ""
+                    matched = match_series_to_utility(s_name, s_id, target_utilities, hierarchy)
+                    if matched:
+                        if matched not in qg_hourly_by_u:
+                            qg_hourly_by_u[matched] = {}
+                        daily_map = parse_interval_points_to_daily_hourly(s.get("data", []), target_dates=dates)
+                        for d_str, h_vals in daily_map.items():
+                            if d_str not in qg_hourly_by_u[matched]:
+                                qg_hourly_by_u[matched][d_str] = [0.0] * 24
+                            for hr in range(24):
+                                qg_hourly_by_u[matched][d_str][hr] = round(
+                                    qg_hourly_by_u[matched][d_str][hr] + h_vals[hr], 4
+                                )
+        except Exception as err:
+            _LOGGER.debug("QuickGraphs fetch during historical hourly failed: %s", err)
+
         results_by_utility: dict[str, Any] = {}
 
         for utility in target_utilities:
@@ -576,13 +852,18 @@ class ProvidentDataUpdateCoordinator(DataUpdateCoordinator[dict[str, ProvidentUt
 
             for d, res in zip(dates, day_results):
                 d_str = d.isoformat()
-                if isinstance(res, dict) and "data" in res:
+                if isinstance(res, dict) and "data" in res and res["data"]:
                     h_data = res["data"]
                     hourly_map[d_str] = h_data
                     totals_map[d_str] = round(sum(h_data), 4)
                 else:
                     hourly_map[d_str] = []
                     totals_map[d_str] = 0.0
+
+                # If GetChartData gave empty/zero but QuickGraphs has data, use QuickGraphs
+                if (not any(hourly_map[d_str])) and utility in qg_hourly_by_u and d_str in qg_hourly_by_u[utility]:
+                    hourly_map[d_str] = qg_hourly_by_u[utility][d_str]
+                    totals_map[d_str] = round(sum(qg_hourly_by_u[utility][d_str]), 4)
 
             results_by_utility[utility] = {
                 "utility": utility,

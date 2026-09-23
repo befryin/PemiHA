@@ -185,6 +185,9 @@ if "homeassistant" not in sys.modules:
         async def async_config_entry_first_refresh(self):
             self.data = await self._async_update_data()
 
+        async def async_refresh(self):
+            self.data = await self._async_update_data()
+
         async def _async_update_data(self):
             raise NotImplementedError
 
@@ -314,6 +317,15 @@ if "homeassistant" not in sys.modules:
     ha_util_dt = types.ModuleType("homeassistant.util.dt")
     ha_util_dt.utcnow = lambda: datetime.now(timezone.utc)
     ha_util_dt.now = lambda: datetime.now()
+    ha_util_dt.DEFAULT_TIME_ZONE = timezone.utc
+    ha_util_dt.as_local = lambda dt: dt
+    ha_util_dt.utc_from_timestamp = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc)
+    def _parse_dt(s):
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+    ha_util_dt.parse_datetime = _parse_dt
     ha_util.dt = ha_util_dt
 
     import re

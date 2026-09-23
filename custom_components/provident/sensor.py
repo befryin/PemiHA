@@ -179,6 +179,7 @@ def _build_sensor_descriptions(
                 "hourly_readings": data.yesterday_hourly,
                 "historical_hourly_by_date": data.daily_hourly_history,
                 "historical_daily_totals": data.daily_totals_history,
+                "hourly_breakdown_past_days": data.hourly_breakdown_past_days,
                 "latest_hourly_reading": data.latest_reading,
                 "spot_name": data.spot_name,
                 "spots": data.spots,

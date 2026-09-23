@@ -1,7 +1,7 @@
 """Tests for Provident Energy coordinator."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +24,10 @@ from custom_components.provident.const import (
 )
 from custom_components.provident.coordinator import (
     ProvidentDataUpdateCoordinator,
+    match_series_to_utility,
     normalize_unit,
+    parse_interval_points_to_daily_hourly,
+    parse_timestamp_to_datetime,
 )
 
 
@@ -248,6 +251,185 @@ class TestProvidentCoordinator(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(UpdateFailed):
             await coordinator.async_config_entry_first_refresh()
+
+    def test_parse_timestamp_to_datetime(self):
+        """Test timestamp parsing for ms epoch, s epoch, ISO, and ASP.NET strings."""
+        # Milliseconds epoch
+        dt_ms = parse_timestamp_to_datetime(1726790400000)
+        self.assertIsNotNone(dt_ms)
+        self.assertEqual(dt_ms.year, 2024)
+
+        # Seconds epoch
+        dt_s = parse_timestamp_to_datetime(1726790400)
+        self.assertIsNotNone(dt_s)
+        self.assertEqual(dt_s.year, 2024)
+
+        # ISO string
+        dt_iso = parse_timestamp_to_datetime("2026-09-22T14:30:00")
+        self.assertIsNotNone(dt_iso)
+        self.assertEqual(dt_iso.hour, 14)
+        self.assertEqual(dt_iso.minute, 30)
+
+        # ASP.NET /Date(1726790400000)/
+        dt_asp = parse_timestamp_to_datetime("/Date(1726790400000)/")
+        self.assertIsNotNone(dt_asp)
+        self.assertEqual(dt_asp.year, 2024)
+
+        # None / invalid
+        self.assertIsNone(parse_timestamp_to_datetime(None))
+        self.assertIsNone(parse_timestamp_to_datetime("invalid-string-date"))
+
+    def test_parse_interval_points_to_daily_hourly(self):
+        """Test bucketing interval timestamped points into 24-hour daily arrays."""
+        # 2 readings in hour 10 on 2026-09-20 (e.g. 15-min intervals)
+        dt1 = datetime(2026, 9, 20, 10, 15, 0, tzinfo=timezone.utc)
+        dt2 = datetime(2026, 9, 20, 10, 45, 0, tzinfo=timezone.utc)
+        dt3 = datetime(2026, 9, 21, 14, 0, 0, tzinfo=timezone.utc)
+
+        pts = [
+            [int(dt1.timestamp() * 1000), 0.25],
+            [int(dt2.timestamp() * 1000), 0.75],
+            {"x": int(dt3.timestamp() * 1000), "y": 1.5},
+        ]
+
+        buckets = parse_interval_points_to_daily_hourly(pts)
+        self.assertIn("2026-09-20", buckets)
+        self.assertIn("2026-09-21", buckets)
+        self.assertEqual(len(buckets["2026-09-20"]), 24)
+        self.assertEqual(len(buckets["2026-09-21"]), 24)
+        # Hour 10 accumulated sum: 0.25 + 0.75 = 1.0
+        self.assertEqual(buckets["2026-09-20"][10], 1.0)
+        self.assertEqual(buckets["2026-09-21"][14], 1.5)
+
+    def test_match_series_to_utility(self):
+        """Test matching QuickGraphs series to known utility names."""
+        utilities = ["Electricity", "EV", "Hot Water", "Cooling", "Heating"]
+        hierarchy = {
+            "meters": {
+                "MP:100": {"name": "Heating", "type": "thermal", "parent_group": "G1"},
+                "MP:200": {"name": "Fan Coil", "type": "cooling", "parent_group": "G2"},
+                "MP:300": {"name": "DHW", "type": "water", "parent_group": None},
+                "MP:400": {"name": "EV Spot 14", "type": "electric", "parent_group": "G3"},
+            },
+            "groups": {
+                "G1": {"name": "Heating"},
+                "G2": {"name": "Cooling"},
+                "G3": {"name": "EV Parking"},
+            },
+        }
+
+        self.assertEqual(match_series_to_utility("Heating", "MP:100", utilities, hierarchy), "Heating")
+        self.assertEqual(match_series_to_utility("Cooling", "MP:200", utilities, hierarchy), "Cooling")
+        self.assertEqual(match_series_to_utility("Hot Water", "MP:300", utilities, hierarchy), "Hot Water")
+        self.assertEqual(match_series_to_utility("Domestic Hot Water", "MP:300", utilities, hierarchy), "Hot Water")
+        self.assertEqual(match_series_to_utility("EV - Spot P2-14", "MP:400", utilities, hierarchy), "EV")
+        self.assertEqual(match_series_to_utility("Electricity", "MP:999", utilities, hierarchy), "Electricity")
+
+    @patch("custom_components.provident.coordinator.ProvidentAPIClient")
+    async def test_coordinator_initial_7day_load_and_daily_refresh(self, mock_client_cls):
+        """Verify initial load queries 7 days and subsequent refresh queries 1 day."""
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.is_authenticated = True
+        mock_client.check_login.return_value = True
+
+        mock_client.get_utilities.return_value = ["Electricity", "EV", "Hot Water", "Cooling", "Heating"]
+        mock_client.get_meter_hierarchy.return_value = {
+            "groups": {"G1": {"name": "EV"}},
+            "meters": {
+                "M1": {"id": "M1", "name": "Electricity", "parent_group": None},
+                "M2": {"id": "M2", "name": "Heating", "parent_group": None},
+                "M3": {"id": "M3", "name": "Cooling", "parent_group": None},
+                "M4": {"id": "M4", "name": "Hot Water", "parent_group": None},
+                "M5": {"id": "M5", "name": "EV - Spot P2-14", "parent_group": "G1"},
+            },
+            "meter_list": ["M1", "M2", "M3", "M4", "M5", "GROUP:G1"],
+        }
+
+        # Build 7 days of QuickGraphs test data
+        now = datetime.now()
+        today = now.date()
+        qg_points_heating = []
+        qg_points_cooling = []
+        qg_points_hot_water = []
+        for i in range(1, 8):
+            d = today - timedelta(days=i)
+            dt_pt = datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=timezone.utc)
+            ts = int(dt_pt.timestamp() * 1000)
+            qg_points_heating.append([ts, 1.25])
+            qg_points_cooling.append([ts, 2.50])
+            qg_points_hot_water.append([ts, 0.08])
+
+        qg_7day_series = [
+            {"name": "Heating", "meterId": "M2", "unit": "kWh", "data": qg_points_heating},
+            {"name": "Cooling", "meterId": "M3", "unit": "kWh", "data": qg_points_cooling},
+            {"name": "Hot Water", "meterId": "M4", "unit": "m³", "data": qg_points_hot_water},
+            {"name": "EV - Spot P2-14", "meterId": "M5", "unit": "kWh", "data": [[int(datetime(today.year, today.month, today.day, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000), 5.0]]},
+        ]
+
+        mock_client.get_quickgraphs.return_value = qg_7day_series
+        mock_client.get_card_data.return_value = {"total": 100.0, "units": "kWh", "data": [5.0]*30}
+        mock_client.get_chart_data.return_value = {"error": False, "units": "kWh", "data": [0.0]*24}
+
+        coordinator = ProvidentDataUpdateCoordinator(self.hass, self.entry)
+
+        # 1. INITIAL REFRESH (coordinator.data is empty) -> Should query 7 days!
+        await coordinator.async_config_entry_first_refresh()
+
+        # Check that get_quickgraphs was called with start_date = today - 7 days
+        calls = mock_client.get_quickgraphs.call_args_list
+        self.assertTrue(len(calls) >= 1)
+        first_call_kwargs = calls[0].kwargs
+        expected_7d_start = today - timedelta(days=7)
+        self.assertEqual(first_call_kwargs["start_date"], expected_7d_start)
+        self.assertEqual(first_call_kwargs["end_date"], today)
+
+        # Verify Heating, Cooling, and Hot Water have 7 days in daily_hourly_history
+        heating = coordinator.data["Heating"]
+        self.assertEqual(len(heating.daily_hourly_history), 7)
+        self.assertEqual(len(heating.hourly_breakdown_past_days), 7)
+        yesterday_str = (today - timedelta(days=1)).isoformat()
+        self.assertIn(yesterday_str, heating.daily_hourly_history)
+        self.assertEqual(heating.yesterday_hourly[12], 1.25)
+        self.assertEqual(heating.yesterday_total, 1.25)
+
+        cooling = coordinator.data["Cooling"]
+        self.assertEqual(len(cooling.daily_hourly_history), 7)
+        self.assertEqual(len(cooling.hourly_breakdown_past_days), 7)
+        self.assertEqual(cooling.yesterday_hourly[12], 2.50)
+        self.assertEqual(cooling.yesterday_total, 2.50)
+
+        hw = coordinator.data["Hot Water"]
+        self.assertEqual(len(hw.daily_hourly_history), 7)
+        self.assertEqual(len(hw.hourly_breakdown_past_days), 7)
+        self.assertEqual(hw.yesterday_hourly[12], 0.08)
+        self.assertEqual(hw.yesterday_total, 0.08)
+
+        # 2. SUBSEQUENT DAILY REFRESH -> Should query only 1 day (yesterday)
+        mock_client.get_quickgraphs.reset_mock()
+        yesterday = today - timedelta(days=1)
+        dt_yesterday = datetime(yesterday.year, yesterday.month, yesterday.day, 12, 0, 0, tzinfo=timezone.utc)
+        ts_y = int(dt_yesterday.timestamp() * 1000)
+        mock_client.get_quickgraphs.return_value = [
+            {"name": "Heating", "meterId": "M2", "unit": "kWh", "data": [[ts_y, 1.80]]},
+            {"name": "Cooling", "meterId": "M3", "unit": "kWh", "data": [[ts_y, 3.10]]},
+            {"name": "Hot Water", "meterId": "M4", "unit": "m³", "data": [[ts_y, 0.12]]},
+        ]
+
+        await coordinator.async_refresh()
+
+        # Verify get_quickgraphs was called with start_date = yesterday (1 day only!)
+        calls_refresh = mock_client.get_quickgraphs.call_args_list
+        self.assertTrue(len(calls_refresh) >= 1)
+        refresh_call_kwargs = calls_refresh[0].kwargs
+        self.assertEqual(refresh_call_kwargs["start_date"], yesterday)
+        self.assertEqual(refresh_call_kwargs["end_date"], today)
+
+        # Verify history is preserved and yesterday is updated
+        self.assertEqual(coordinator.data["Heating"].yesterday_total, 1.80)
+        self.assertEqual(coordinator.data["Cooling"].yesterday_total, 3.10)
+        self.assertEqual(coordinator.data["Hot Water"].yesterday_total, 0.12)
+        self.assertEqual(len(coordinator.data["Heating"].daily_hourly_history), 7)
 
 
 if __name__ == "__main__":

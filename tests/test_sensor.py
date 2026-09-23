@@ -229,6 +229,42 @@ class TestProvidentSensor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m_sensor.suggested_object_id, "provident_ev_spot_p2_14_month")
         self.assertEqual(m_sensor.unique_id, "test_entry_id_ev_spot_p2_14_month")
 
+    def test_heating_cooling_hot_water_7day_attributes(self):
+        """Verify Heating, Cooling, and Hot Water sensors expose 7 days of hourly history in attributes."""
+        seven_days_hourly = {f"2026-09-{10+i}": [0.1 * i] * 24 for i in range(1, 8)}
+        seven_days_totals = {f"2026-09-{10+i}": round(sum([0.1 * i] * 24), 2) for i in range(1, 8)}
+        breakdown_list = [
+            {"date": d, "total": seven_days_totals[d], "hourly": seven_days_hourly[d]}
+            for d in sorted(seven_days_hourly.keys(), reverse=True)
+        ]
+
+        for util, unit in [("Heating", "kWh"), ("Cooling", "kWh"), ("Hot Water", "m³")]:
+            u_data = ProvidentUtilityData(
+                name=util,
+                units=unit,
+                portal_total=50.0,
+                yesterday_total=seven_days_totals["2026-09-17"],
+                yesterday_hourly=seven_days_hourly["2026-09-17"],
+                yesterday_date="2026-09-17",
+                daily_hourly_history=seven_days_hourly,
+                daily_totals_history=seven_days_totals,
+                hourly_breakdown_past_days=breakdown_list,
+            )
+            self.coordinator.data = {util: u_data}
+            desc = next(d for d in _build_sensor_descriptions(util, unit) if d.key == SENSOR_TYPE_YESTERDAY)
+            entity = ProvidentSensorEntity(self.coordinator, self.entry, util, desc)
+
+            attrs = entity.extra_state_attributes
+            self.assertIn("historical_hourly_by_date", attrs)
+            self.assertEqual(len(attrs["historical_hourly_by_date"]), 7)
+            self.assertIn("hourly_breakdown_past_days", attrs)
+            self.assertEqual(len(attrs["hourly_breakdown_past_days"]), 7)
+            self.assertIn("historical_daily_totals", attrs)
+            self.assertEqual(len(attrs["historical_daily_totals"]), 7)
+            self.assertEqual(attrs["hourly_breakdown_past_days"][0]["date"], "2026-09-17")
+            self.assertEqual(attrs["reading_date"], "2026-09-17")
+            self.assertEqual(len(attrs["hourly_readings"]), 24)
+
 
 if __name__ == "__main__":
     unittest.main()
